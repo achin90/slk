@@ -144,6 +144,11 @@ type App struct {
 	// any mode change disarms (see SetMode).
 	pendingWinCmd bool
 
+	// pendingG is true between the first and second `g` of the vim-style
+	// `gg` (jump-to-top) chord. A non-g key cancels silently and falls
+	// through to normal handling; any mode change disarms (see SetMode).
+	pendingG bool
+
 	// layout owns the per-frame layout geometry (horizontal bands for
 	// mouse hit-testing + per-pane content heights for pageSize). See
 	// internal/ui/panellayout.go.
@@ -1326,6 +1331,23 @@ func (a *App) handleGoToBottom() tea.Cmd {
 	return nil
 }
 
+func (a *App) handleGoToTop() tea.Cmd {
+	switch a.focusedPanel {
+	case PanelSidebar:
+		a.sidebar.GoToTop()
+	case PanelMessages:
+		if a.view == ViewThreads {
+			a.threadsView.GoToTop()
+			// gg is a one-shot jump — fire the fetch immediately.
+			return a.openSelectedThreadCmd(false)
+		}
+		a.messagepane.GoToTop()
+	case PanelThread:
+		a.threadPanel.GoToTop()
+	}
+	return nil
+}
+
 // pageSize returns the number of lines to scroll for a full-page jump in the
 // currently-focused panel. Falls back to a sensible default if the layout
 // hasn't been measured yet (i.e. before the first render).
@@ -1549,6 +1571,10 @@ func (a *App) SetMode(mode Mode) {
 	// other helpHint states aren't clobbered by unrelated mode changes.
 	if a.pendingWinCmd {
 		a.pendingWinCmd = false
+		a.statusbar.SetHelpHint(a.defaultHelpHint())
+	}
+	if a.pendingG {
+		a.pendingG = false
 		a.statusbar.SetHelpHint(a.defaultHelpHint())
 	}
 	if mode == ModeInsert {

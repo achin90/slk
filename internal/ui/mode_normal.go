@@ -7,7 +7,7 @@
 //     prompt), Ctrl-Y (theme switcher), ? (help),
 //     S (presence menu), R (reaction picker)
 //   - navigation: j/k (selection), Ctrl-D/U (half-page), C-f/b
-//     (page), G (bottom), Tab/h/l (focus next/prev), Ctrl-o/i
+//     (page), gg/G (top/bottom), Tab/h/l (focus next/prev), Ctrl-o/i
 //     (nav back/forward through visited channels)
 //   - layout toggles: s (sidebar), t (thread)
 //   - message ops: y (copy permalink), E (edit), D (delete),
@@ -43,6 +43,18 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		a.pendingWinCmd = false
 		a.statusbar.SetHelpHint(a.defaultHelpHint())
 		return a.handleWindowChord(msg)
+	}
+
+	// gg pending sub-state: the first `g` armed a pending chord; a
+	// second `g` jumps to top, any other key cancels silently and
+	// falls through to normal handling below.
+	if a.pendingG {
+		a.pendingG = false
+		a.statusbar.SetHelpHint(a.defaultHelpHint())
+		if msg.String() == "g" {
+			return a.handleGoToTop()
+		}
+		// non-g: fall through to normal key handling
 	}
 
 	// Reaction-nav sub-state (intercept before normal keys).
@@ -181,6 +193,14 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 		}
+
+	case key.Matches(msg, a.keys.Top):
+		// First `g` of the vim-style `gg` chord — arm the pending
+		// state and wait for the second `g` (handled by the
+		// pendingG intercept at the top of this function).
+		a.pendingG = true
+		a.statusbar.SetHelpHint("g …")
+		return nil
 
 	case key.Matches(msg, a.keys.Bottom):
 		if cmd := a.handleGoToBottom(); cmd != nil {
