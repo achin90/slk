@@ -183,6 +183,11 @@ type WorkspaceContext struct {
 	UserID        string
 	UnresolvedDMs []UnresolvedDM
 	CustomEmoji   map[string]string // emoji name -> URL or "alias:target"
+	// EmojiCacheTS is Slack's emoji cache-version token from
+	// users.boot. It is persisted alongside the custom-emoji map so
+	// that future launches can echo it back to emoji.list for an
+	// incremental response. Empty on first run.
+	EmojiCacheTS string
 	// userGroups holds this workspace's usergroup ID -> handle map.
 	// Access it via UserGroups/SetUserGroups, never directly.
 	//
@@ -2074,6 +2079,19 @@ func run() error {
 					return
 				}
 				wctx.CustomEmoji = emojis
+				// Persist to the local cache so the next launch has
+				// custom emojis available immediately, before this
+				// background fetch completes. Best-effort: failure is
+				// logged and leaves the cache stale; the in-memory map
+				// is still correct for this session.
+				if err := db.SaveCustomEmojis(teamID, emojis); err != nil {
+					debuglog.General("caching custom emoji for %s: %v", wctx.TeamName, err)
+				}
+				if wctx.EmojiCacheTS != "" {
+					if err := db.SaveEmojiCacheTS(teamID, wctx.EmojiCacheTS); err != nil {
+						debuglog.General("caching emoji_cache_ts for %s: %v", wctx.TeamName, err)
+					}
+				}
 				p.Send(ui.CustomEmojisLoadedMsg{
 					TeamID:      teamID,
 					CustomEmoji: emojis,
@@ -2381,6 +2399,25 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 	// the background fetch below still covers those.
 	if len(res.Emojis) > 0 {
 		wctx.CustomEmoji = res.Emojis
+	}
+	wctx.EmojiCacheTS = res.EmojiCacheTS
+	// Seed from the local cache so the reaction picker and compose
+	// autocomplete have custom emojis available immediately on
+	// startup, before the background emoji.list fetch completes. If
+	// conversations.view returned a partial set, the cache fills in
+	// any gaps; if it returned nothing, the cache is the sole source.
+	// The background fetch below overwrites with the authoritative
+	// full list once it lands.
+	if cached, err := db.LoadCustomEmojis(client.TeamID()); err == nil && len(cached) > 0 {
+		if wctx.CustomEmoji == nil {
+			wctx.CustomEmoji = cached
+		} else {
+			for name, val := range cached {
+				if _, ok := wctx.CustomEmoji[name]; !ok {
+					wctx.CustomEmoji[name] = val
+				}
+			}
+		}
 	}
 	hydrateFirstSight(db, client.TeamID(), res)
 
