@@ -130,6 +130,14 @@ type KittyRenderer struct {
 	// Acceptable; if it ever becomes a concern, an LRU eviction can
 	// be added without changing the contract.
 	payloads map[placeholderKey]string
+
+	// cellW/cellH are the terminal's actual cell pixel dimensions,
+	// used to compute the pixel size of the kitty image upload so
+	// the rendered image fills the placeholder cells exactly.
+	// Defaults to 8x16 (matches legacy behavior); set via
+	// SetCellPixels at startup.
+	cellW atomic.Int64
+	cellH atomic.Int64
 }
 
 // placeholderKey scopes the buildPlaceholderLines memo by the inputs
@@ -145,11 +153,24 @@ type placeholderKey struct {
 
 // NewKittyRenderer constructs a kitty renderer backed by the given registry.
 func NewKittyRenderer(reg *Registry) *KittyRenderer {
-	return &KittyRenderer{
+	k := &KittyRenderer{
 		registry:     reg,
 		sources:      map[string]image.Image{},
 		placeholders: map[placeholderKey][]string{},
 		payloads:     map[placeholderKey]string{},
+	}
+	k.cellW.Store(8)
+	k.cellH.Store(16)
+	return k
+}
+
+// SetCellPixels configures the terminal's actual cell pixel dimensions
+// so the kitty image upload is sized to exactly fill the placeholder
+// cells. Must be called once at startup after probing the terminal.
+func (k *KittyRenderer) SetCellPixels(w, h int) {
+	if w > 0 && h > 0 {
+		k.cellW.Store(int64(w))
+		k.cellH.Store(int64(h))
 	}
 }
 
@@ -226,10 +247,26 @@ func (k *KittyRenderer) RenderKey(key string, target image.Point) Render {
 		payload, payloadHit := k.payloads[payloadKey]
 		k.mu.Unlock()
 		if !payloadHit {
-			pxW := target.X * 8
-			pxH := target.Y * 16
+			pxW := target.X * int(k.cellW.Load())
+			pxH := target.Y * int(k.cellH.Load())
+			// Letterbox rather than stretch: the cell grid's pixel aspect
+			// (whole cells × cell size) can deviate a few percent from the
+			// source's, which reads as visible horizontal/vertical
+			// squeeze. Scale to fit preserving aspect and center on a
+			// transparent canvas; the unused margin stays invisible.
+			srcB := src.Bounds()
+			fitW, fitH := pxW, pxH
+			if sw, sh := srcB.Dx(), srcB.Dy(); sw > 0 && sh > 0 {
+				if sw*pxH >= sh*pxW {
+					fitH = max(1, sh*pxW/sw)
+				} else {
+					fitW = max(1, sw*pxH/sh)
+				}
+			}
+			offX := (pxW - fitW) / 2
+			offY := (pxH - fitH) / 2
 			resized := image.NewRGBA(image.Rect(0, 0, pxW, pxH))
-			draw.BiLinear.Scale(resized, resized.Bounds(), src, src.Bounds(), draw.Over, nil)
+			draw.BiLinear.Scale(resized, image.Rect(offX, offY, offX+fitW, offY+fitH), src, srcB, draw.Over, nil)
 			var pngBuf bytes.Buffer
 			if err := imgpng.Encode(&pngBuf, resized); err == nil {
 				payload = base64.StdEncoding.EncodeToString(pngBuf.Bytes())

@@ -149,6 +149,14 @@ type App struct {
 	// through to normal handling; any mode change disarms (see SetMode).
 	pendingG bool
 
+	// localImages holds the original dimensions and cache key for
+	// images pasted from the local clipboard. When the WS echo for
+	// our own paste arrives, reduceNewMessage uses this to add the
+	// full-resolution image as a thumb so the renderer uses it
+	// instead of Slack's small initial thumbnails. The cache is
+	// pre-seeded at upload time so no HTTP fetch is needed.
+	localImages map[string]localImageInfo
+
 	// layout owns the per-frame layout geometry (horizontal bands for
 	// mouse hit-testing + per-pane content heights for pageSize). See
 	// internal/ui/panellayout.go.

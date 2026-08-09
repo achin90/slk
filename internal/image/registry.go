@@ -3,6 +3,7 @@ package image
 import (
 	"fmt"
 	"image"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 )
@@ -25,13 +26,22 @@ type Registry struct {
 	uploaded map[uint32]bool
 }
 
-// NewRegistry constructs a registry. IDs start at 1 (kitty rejects 0).
+// NewRegistry constructs a registry.
+//
+// The ID counter starts at a random offset rather than 1: the terminal
+// (and tmux) retains transmitted images by ID across slk restarts, so
+// two sessions minting the same small integers would leave placeholder
+// grids pointing at a previous session's image — rendered at that
+// image's old size and content. Placeholder cells encode the ID in a
+// 24-bit SGR color, so the base is chosen to leave a 2^20 window below
+// 2^24 for sequential allocation. Kitty rejects ID 0; the base is
+// always >= 1.
 func NewRegistry() *Registry {
 	r := &Registry{
 		ids:      map[string]uint32{},
 		uploaded: map[uint32]bool{},
 	}
-	r.next.Store(1)
+	r.next.Store(1 + rand.Uint32N(1<<24-1<<20))
 	return r
 }
 

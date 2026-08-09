@@ -535,6 +535,27 @@ type WSMessageDeletedMsg struct {
 	TS        string
 }
 
+// LocalImageSeededMsg is dispatched by the uploader after a local
+// paste/upload completes. It carries the Slack file_id, the original
+// image dimensions (decoded from the local bytes), and the cache key
+// under which the full-resolution bytes were written to the image
+// fetcher's disk cache. When the WS echo for our own paste arrives,
+// reduceNewMessage uses the dimensions to add the original as a
+// thumb; RenderBlock then picks it (largest), finds it in the
+// pre-seeded cache, and renders at full quality without any HTTP
+// fetch.
+type LocalImageSeededMsg struct {
+	FileID string
+	OrigW  int
+	OrigH  int
+}
+
+// localImageInfo is the per-file entry in App.localImages.
+type localImageInfo struct {
+	OrigW int
+	OrigH int
+}
+
 // UploadProgressMsg is dispatched out-of-band by the uploader as
 // each file completes. App updates the status-bar toast.
 type UploadProgressMsg struct {

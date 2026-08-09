@@ -143,6 +143,15 @@ func (c *Cache) Put(key, ext string, data []byte) (string, error) {
 	return path, nil
 }
 
+// Seed writes data to the cache under key with a .png extension.
+// Unlike Put, it returns no path — callers use it purely to pre-populate
+// the cache so a subsequent Get hits. Used by the paste-upload flow
+// to seed the full-resolution image bytes before the WS echo arrives.
+func (c *Cache) Seed(key string, data []byte) error {
+	_, err := c.Put(key, "png", data)
+	return err
+}
+
 // evictLocked removes oldest entries (LRU back) while total exceeds cap.
 // Caller must hold c.mu.
 func (c *Cache) evictLocked() {

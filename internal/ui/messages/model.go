@@ -58,9 +58,12 @@ type Attachment struct {
 	URL  string // permalink (preferred) or url_private
 
 	// Populated only for Kind == "image":
-	FileID string      // Slack file ID for cache key
-	Mime   string      // e.g. "image/png"
-	Thumbs []ThumbSpec // sorted ascending; empty for non-image
+	FileID      string      // Slack file ID for cache key
+	Mime        string      // e.g. "image/png"
+	Thumbs      []ThumbSpec // sorted ascending; empty for non-image
+	OriginalW   int         // original image width from Slack (fallback aspect ratio)
+	OriginalH   int         // original image height from Slack (fallback aspect ratio)
+	FallbackURL string      // URLPrivate; used when thumbs aren't generated yet
 }
 
 // ThumbSpec is one Slack thumbnail variant.
@@ -72,6 +75,31 @@ type ThumbSpec struct {
 	URL string
 	W   int
 	H   int
+}
+
+func thumbSummary(atts []Attachment) string {
+	var b strings.Builder
+	b.WriteString("[")
+	for i, att := range atts {
+		if att.Kind != "image" {
+			continue
+		}
+		if i > 0 && b.Len() > 1 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "fid=%s orig=%dx%d thumbs=%d", att.FileID, att.OriginalW, att.OriginalH, len(att.Thumbs))
+		for _, th := range att.Thumbs {
+			fmt.Fprintf(&b, " %dx%d", th.W, th.H)
+		}
+		if att.FallbackURL != "" {
+			b.WriteString(" +fallback")
+		}
+	}
+	if b.Len() == 1 {
+		b.WriteString("none")
+	}
+	b.WriteString("]")
+	return b.String()
 }
 
 // AvatarFunc returns the rendered half-block avatar for a user ID, or empty string.
@@ -1158,6 +1186,28 @@ func (m *Model) UpdateMessageInPlace(ts, newText string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// UpdateMessageFull replaces the entire MessageItem identified by ts
+// with the supplied value, then invalidates the render cache. Used
+// when a message_changed WebSocket event carries updated attachment
+// metadata (e.g. Slack finished generating thumbnails for a freshly
+// uploaded image). Returns true if the message was found.
+func (m *Model) UpdateMessageFull(ts string, msg MessageItem) bool {
+	for i := range m.messages {
+		if m.messages[i].TS == ts {
+			old := m.messages[i]
+			debuglog.Cache("UpdateMessageFull: ts=%s found=true old_atts=%d new_atts=%d old_thumbs=%s new_thumbs=%s",
+				ts, len(old.Attachments), len(msg.Attachments),
+				thumbSummary(old.Attachments), thumbSummary(msg.Attachments))
+			m.messages[i] = msg
+			m.cache = nil
+			m.dirty()
+			return true
+		}
+	}
+	debuglog.Cache("UpdateMessageFull: ts=%s found=false msg_count=%d", ts, len(m.messages))
 	return false
 }
 
@@ -2264,11 +2314,14 @@ func (m *Model) renderMessagePlain(msg MessageItem, width int, avatarStr string,
 				imgThumbs[i] = imgrender.ThumbSpec{URL: t.URL, W: t.W, H: t.H}
 			}
 			res := m.imgRenderer.RenderBlock(imgrender.Block{
-				Kind:   att.Kind,
-				FileID: att.FileID,
-				Name:   att.Name,
-				URL:    att.URL,
-				Thumbs: imgThumbs,
+				Kind:        att.Kind,
+				FileID:      att.FileID,
+				Name:        att.Name,
+				URL:         att.URL,
+				Thumbs:      imgThumbs,
+				OriginalW:   att.OriginalW,
+				OriginalH:   att.OriginalH,
+				FallbackURL: att.FallbackURL,
 			}, m.channelName, msg.TS, contentWidth, rowCursor, attIdx, contentColBase)
 			attachLineSlices = append(attachLineSlices, res.Lines)
 			allFlushes = append(allFlushes, res.Flushes...)
@@ -3107,6 +3160,11 @@ func (m *Model) viewInternal(height, width int, applySelection bool) string {
 				_ = fl(&kittyFlushBuf)
 			}
 		}
+		ts := ""
+		if e.msgIdx >= 0 && e.msgIdx < len(m.messages) {
+			ts = m.messages[e.msgIdx].TS
+		}
+		debuglog.ImgRender("View: msgIdx=%d ts=%s entry_flushes=%d kitty_buf=%d", e.msgIdx, ts, len(e.flushes), kittyFlushBuf.Len())
 
 		// Translate this entry's per-image hit rects into viewport-
 		// absolute coordinates and record them for HitTest. Rows

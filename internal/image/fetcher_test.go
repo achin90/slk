@@ -203,8 +203,10 @@ func TestFetcher_CachedReturnsImageWhenPresent(t *testing.T) {
 	if img == nil {
 		t.Fatalf("expected non-nil image")
 	}
-	if img.Bounds().Dx() != 20 || img.Bounds().Dy() != 20 {
-		t.Errorf("expected 20x20 downscale, got %v", img.Bounds())
+	// downscale preserves the source aspect ratio: the result fits
+	// within target with at least one dimension exactly at target.
+	if b := img.Bounds(); b.Dx() > 20 || b.Dy() > 20 || (b.Dx() != 20 && b.Dy() != 20) {
+		t.Errorf("expected aspect-fit downscale within 20x20, got %v", b)
 	}
 }
 

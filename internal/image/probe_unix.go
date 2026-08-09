@@ -9,6 +9,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Platform-specific aliases used by pollKittyWindowSize in probe.go.
+// Defined here (unix) and in probe_other.go (non-unix) so probe.go
+// stays build-tag-free.
+type unixPollFd = unix.PollFd
+
+const (
+	unixPollIn   = unix.POLLIN
+	unixPollHUP  = unix.POLLHUP
+	unixPollErr  = unix.POLLERR
+	unixPollNval = unix.POLLNVAL
+)
+
+var (
+	unixPoll  = unix.Poll
+	unixRead  = unix.Read
+	unixEINTR = unix.EINTR
+	unixEAGAIN = unix.EAGAIN
+)
+
 // pollProbe reads from fd up to timeout, looking for a kitty graphics
 // ;OK reply. Synchronous (no goroutine) so no leak is possible. Uses
 // poll(2) with a millisecond timeout to wait for readable data, then

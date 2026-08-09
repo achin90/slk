@@ -14,15 +14,26 @@ import (
 
 func TestComputeImageTarget_NoThumbs_ReturnsZero(t *testing.T) {
 	ctx := ImageContext{CellPixels: image.Pt(8, 16), MaxRows: 20}
-	got := computeImageTarget(nil, ctx, 80)
+	got := computeImageTarget(nil, ctx, 80, 0, 0)
 	if got != (image.Point{}) {
 		t.Fatalf("expected zero point for empty thumbs, got %+v", got)
 	}
 }
 
+func TestComputeImageTarget_NoThumbs_FallbackToOriginal(t *testing.T) {
+	ctx := ImageContext{CellPixels: image.Pt(8, 16), MaxRows: 20}
+	got := computeImageTarget(nil, ctx, 80, 1600, 900)
+	if got == (image.Point{}) {
+		t.Fatal("expected non-zero target when original dims are available")
+	}
+	if got.Y > 20 {
+		t.Fatalf("rows %d exceeds MaxRows 20", got.Y)
+	}
+}
+
 func TestComputeImageTarget_ZeroCellPixels_ReturnsZero(t *testing.T) {
 	ctx := ImageContext{CellPixels: image.Pt(0, 0), MaxRows: 20}
-	got := computeImageTarget([]ThumbSpec{{URL: "u", W: 320, H: 240}}, ctx, 80)
+	got := computeImageTarget([]ThumbSpec{{URL: "u", W: 320, H: 240}}, ctx, 80, 0, 0)
 	if got != (image.Point{}) {
 		t.Fatalf("expected zero point for zero cell pixels, got %+v", got)
 	}
@@ -32,7 +43,7 @@ func TestComputeImageTarget_LandscapeRespectsWidthCap(t *testing.T) {
 	// Wide image: 800x100 with 8x16 cells gives aspect=8 — at MaxRows=20
 	// that's 320 cols of unbounded width, but availWidth=40 should cap it.
 	ctx := ImageContext{CellPixels: image.Pt(8, 16), MaxRows: 20}
-	got := computeImageTarget([]ThumbSpec{{W: 800, H: 100}}, ctx, 40)
+	got := computeImageTarget([]ThumbSpec{{W: 800, H: 100}}, ctx, 40, 0, 0)
 	if got.X > 40 {
 		t.Fatalf("cols %d exceeds availWidth 40", got.X)
 	}
@@ -46,7 +57,7 @@ func TestComputeImageTarget_PortraitRespectsRowCap(t *testing.T) {
 	// cols = 20 * 0.125 / 0.5 = 5. Within 80-wide pane, no width clamp.
 	// Rows stays at MaxRows.
 	ctx := ImageContext{CellPixels: image.Pt(8, 16), MaxRows: 20}
-	got := computeImageTarget([]ThumbSpec{{W: 100, H: 800}}, ctx, 80)
+	got := computeImageTarget([]ThumbSpec{{W: 100, H: 800}}, ctx, 80, 0, 0)
 	if got.Y > 20 {
 		t.Fatalf("rows %d exceeds MaxRows 20", got.Y)
 	}
@@ -58,7 +69,7 @@ func TestComputeImageTarget_PortraitRespectsRowCap(t *testing.T) {
 func TestComputeImageTarget_ColsClampToOneWhenUnderflow(t *testing.T) {
 	// Extreme tall/skinny: 1x100000, MaxRows=1. cols would be 0; should clamp to 1.
 	ctx := ImageContext{CellPixels: image.Pt(8, 16), MaxRows: 1}
-	got := computeImageTarget([]ThumbSpec{{W: 1, H: 100000}}, ctx, 80)
+	got := computeImageTarget([]ThumbSpec{{W: 1, H: 100000}}, ctx, 80, 0, 0)
 	if got.X != 1 {
 		t.Fatalf("expected cols to clamp to 1, got %d", got.X)
 	}
@@ -196,5 +207,53 @@ func TestRenderBlock_ImageWithProtoOff_FallsBack(t *testing.T) {
 	}
 	if !strings.Contains(res.Lines[0], "[Image]") {
 		t.Fatalf("expected [Image] prefix in fallback, got %q", res.Lines[0])
+	}
+}
+
+func TestComputeImageTarget_SmallImageCapsAtNativeSize(t *testing.T) {
+	// A small Retina paste: Slack's only thumb is a 1x rendition
+	// (107x103) of a 214x206 original. The grid must cap at the
+	// original's pixel footprint instead of stretching to MaxRows.
+	ctx := ImageContext{CellPixels: image.Pt(13, 26), MaxRows: 20, MaxCols: 60}
+	got := computeImageTarget([]ThumbSpec{{URL: "u", W: 107, H: 103}}, ctx, 174, 214, 206)
+	want := image.Pt(16, 8) // ceil(206/26)=8 rows; cols from aspect
+	if got != want {
+		t.Fatalf("computeImageTarget = %v, want %v", got, want)
+	}
+}
+
+func TestComputeImageTarget_SmallThumbNoOrigCapsAtThumbSize(t *testing.T) {
+	// No original dims known: the largest thumb's own pixel size is
+	// the upscale ceiling.
+	ctx := ImageContext{CellPixels: image.Pt(13, 26), MaxRows: 20, MaxCols: 60}
+	got := computeImageTarget([]ThumbSpec{{URL: "u", W: 107, H: 103}}, ctx, 174, 0, 0)
+	want := image.Pt(8, 4)
+	if got != want {
+		t.Fatalf("computeImageTarget = %v, want %v", got, want)
+	}
+}
+
+func TestComputeImageTarget_LargeImageStillFillsMaxRows(t *testing.T) {
+	// Large sources keep the pre-cap behavior: fill MaxRows, clamp cols.
+	ctx := ImageContext{CellPixels: image.Pt(13, 26), MaxRows: 20, MaxCols: 60}
+	got := computeImageTarget([]ThumbSpec{{URL: "u", W: 960, H: 518}}, ctx, 174, 2866, 1546)
+	want := image.Pt(60, 16)
+	if got != want {
+		t.Fatalf("computeImageTarget = %v, want %v", got, want)
+	}
+}
+
+func TestAllThumbsSmallerThan(t *testing.T) {
+	target := image.Pt(208, 208)
+	small := []imgpkg.ThumbSpec{{W: 107, H: 103}}
+	if !allThumbsSmallerThan(small, target) {
+		t.Fatal("expected all-smaller for 107x103 vs 208x208")
+	}
+	big := []imgpkg.ThumbSpec{{W: 107, H: 103}, {W: 360, H: 194}}
+	if allThumbsSmallerThan(big, target) {
+		t.Fatal("expected false when one thumb matches/exceeds target in an axis")
+	}
+	if allThumbsSmallerThan(nil, target) {
+		t.Fatal("expected false for empty thumb list")
 	}
 }

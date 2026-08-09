@@ -11,6 +11,7 @@ package imgrender
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"io"
 	"strings"
@@ -103,34 +104,68 @@ type SixelEntry struct {
 }
 
 // computeImageTarget chooses (cols, rows) for an inline image render.
-// Aspect ratio is preserved. rows is capped at ctx.MaxRows; cols is
-// capped at min(availWidth, ctx.MaxCols). Returns image.Point{} when
-// the attachment has no usable thumbnail or the cell metrics are zero.
+// Aspect ratio is preserved. rows is capped at ctx.MaxRows and cols at
+// min(availWidth, ctx.MaxCols); both are additionally capped at the
+// source's native pixel footprint so small images are never upscaled
+// past 1:1. Returns image.Point{} when the attachment has no usable
+// thumbnail or the cell metrics are zero.
 //
 // The largest thumb in the slice is used as the source aspect ratio
 // (matching the existing messages-pane behavior).
-func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth int) image.Point {
-	if len(thumbs) == 0 || ctx.CellPixels.X <= 0 || ctx.CellPixels.Y <= 0 {
-		debuglog.ImgRender("computeImageTarget: thumbs=%d cell_px=(%d,%d) → zero target",
-			len(thumbs), ctx.CellPixels.X, ctx.CellPixels.Y)
+func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth, origW, origH int) image.Point {
+	if ctx.CellPixels.X <= 0 || ctx.CellPixels.Y <= 0 {
+		debuglog.ImgRender("computeImageTarget: cell_px=(%d,%d) → zero target",
+			ctx.CellPixels.X, ctx.CellPixels.Y)
 		return image.Point{}
 	}
-	largest := thumbs[len(thumbs)-1]
-	if largest.W <= 0 || largest.H <= 0 {
-		debuglog.ImgRender("computeImageTarget: largest_thumb_dims=(%d,%d) → zero target",
-			largest.W, largest.H)
+	var aspectW, aspectH int
+	aspectSource := "none"
+	if len(thumbs) > 0 {
+		largest := thumbs[len(thumbs)-1]
+		aspectW, aspectH = largest.W, largest.H
+		aspectSource = fmt.Sprintf("thumb[%dx%d]", largest.W, largest.H)
+	}
+	if aspectW <= 0 || aspectH <= 0 {
+		aspectW, aspectH = origW, origH
+		if aspectSource != "none" {
+			aspectSource += "→orig"
+		} else {
+			aspectSource = "orig"
+		}
+	}
+	if aspectW <= 0 || aspectH <= 0 {
+		debuglog.ImgRender("computeImageTarget: no usable dims (thumbs=%d orig=(%d,%d)) → zero target",
+			len(thumbs), origW, origH)
 		return image.Point{}
 	}
-	aspect := float64(largest.W) / float64(largest.H)
+	aspect := float64(aspectW) / float64(aspectH)
 	cellRatio := float64(ctx.CellPixels.X) / float64(ctx.CellPixels.Y)
+
+	// Never upscale: cap the cell grid at the source's native pixel
+	// footprint so small images render ~1:1 instead of stretching to
+	// fill MaxRows. Native dims prefer the file's original size over
+	// thumbnail metadata (thumbs can be 1x renditions of a 2x source).
+	nativeW, nativeH := aspectW, aspectH
+	if origW > nativeW {
+		nativeW = origW
+	}
+	if origH > nativeH {
+		nativeH = origH
+	}
 
 	rows := ctx.MaxRows
 	if rows <= 0 {
 		rows = 20
 	}
+	if nativeRows := (nativeH + ctx.CellPixels.Y - 1) / ctx.CellPixels.Y; nativeRows < rows {
+		rows = nativeRows
+	}
 	maxCols := availWidth
 	if ctx.MaxCols > 0 && ctx.MaxCols < maxCols {
 		maxCols = ctx.MaxCols
+	}
+	if nativeCols := (nativeW + ctx.CellPixels.X - 1) / ctx.CellPixels.X; nativeCols < maxCols {
+		maxCols = nativeCols
 	}
 	cols := int(float64(rows) * aspect / cellRatio)
 	if cols < 1 {
@@ -145,10 +180,22 @@ func computeImageTarget(thumbs []ThumbSpec, ctx ImageContext, availWidth int) im
 	if rows < 1 {
 		rows = 1
 	}
-	debuglog.ImgRender("computeImageTarget: natural=(%d,%d) avail_cols=%d MaxCols=%d MaxRows=%d cell_px=(%d,%d) target=(%d,%d) clamped_to_cols=%v",
-		largest.W, largest.H, availWidth, ctx.MaxCols, ctx.MaxRows,
+	debuglog.ImgRender("computeImageTarget: thumbs=%d orig=(%d,%d) aspect_source=%s native=(%d,%d) avail_cols=%d MaxCols=%d MaxRows=%d cell_px=(%d,%d) target=(%d,%d) clamped=%v",
+		len(thumbs), origW, origH, aspectSource, nativeW, nativeH, availWidth, ctx.MaxCols, ctx.MaxRows,
 		ctx.CellPixels.X, ctx.CellPixels.Y, cols, rows, clamped)
 	return image.Pt(cols, rows)
+}
+
+// allThumbsSmallerThan reports whether every thumb's stated dimensions
+// fall short of the pixel target in both axes — i.e. rendering at
+// target size would require upscaling whichever thumb is chosen.
+func allThumbsSmallerThan(thumbs []imgpkg.ThumbSpec, target image.Point) bool {
+	for _, t := range thumbs {
+		if t.W >= target.X || t.H >= target.Y {
+			return false
+		}
+	}
+	return len(thumbs) > 0
 }
 
 // buildPlaceholder produces a target.Y-row block with theme-surface
@@ -203,11 +250,14 @@ func buildPlaceholder(name string, target image.Point) []string {
 // Defining a local struct here avoids a circular import on the messages
 // package.
 type Block struct {
-	Kind   string // "image" or anything else (non-image falls back to text)
-	FileID string // Slack file ID; required for cache keys
-	Name   string // user-visible filename (for placeholder label)
-	URL    string // canonical URL for OSC 8 hyperlink in the legacy text fallback
-	Thumbs []ThumbSpec
+	Kind        string // "image" or anything else (non-image falls back to text)
+	FileID      string // Slack file ID; required for cache keys
+	Name        string // user-visible filename (for placeholder label)
+	URL         string // canonical URL for OSC 8 hyperlink in the legacy text fallback
+	Thumbs      []ThumbSpec
+	OriginalW   int    // original image width; fallback aspect ratio when thumbs are empty
+	OriginalH   int    // original image height; fallback aspect ratio when thumbs are empty
+	FallbackURL string // URLPrivate; used when no thumbs are available yet
 }
 
 // BlockResult bundles RenderBlock's return values.
@@ -315,7 +365,7 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
 	}
 
-	target := computeImageTarget(att.Thumbs, r.ctx, availWidth)
+	target := computeImageTarget(att.Thumbs, r.ctx, availWidth, att.OriginalW, att.OriginalH)
 	if target.X <= 0 || target.Y <= 0 {
 		debuglog.ImgRender("RenderBlock: file_id=%s decision=legacy_text reason=zero_target", att.FileID)
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
@@ -327,6 +377,21 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 		imgThumbs[i] = imgpkg.ThumbSpec{URL: t.URL, W: t.W, H: t.H}
 	}
 	url, suffix := imgpkg.PickThumb(imgThumbs, pixelTarget)
+	if url == "" && att.FallbackURL != "" {
+		// No thumbnails generated yet (race between upload and Slack's
+		// async thumb pipeline). Use the full-resolution file URL.
+		url = att.FallbackURL
+		suffix = "original"
+		debuglog.ImgRender("RenderBlock: file_id=%s using fallback_url (no thumbs ready)", att.FileID)
+	} else if url != "" && att.FallbackURL != "" && allThumbsSmallerThan(imgThumbs, pixelTarget) {
+		// Every thumbnail is smaller than the render target (typical for
+		// small Retina pastes, where Slack's largest thumb is a 1x
+		// rendition). Fetch the original instead of upscaling a thumb.
+		url = att.FallbackURL
+		suffix = "original"
+		debuglog.ImgRender("RenderBlock: file_id=%s using fallback_url (all thumbs < target=(%d,%d))",
+			att.FileID, pixelTarget.X, pixelTarget.Y)
+	}
 	if url == "" {
 		debuglog.ImgRender("RenderBlock: file_id=%s decision=legacy_text reason=no_thumb_url", att.FileID)
 		return BlockResult{Lines: []string{renderLegacyLine(att)}, Height: 1}
@@ -399,8 +464,8 @@ func (r *Renderer) RenderBlock(att Block, channel, ts string, availWidth, baseRo
 		} else if pr.OnFlush != nil {
 			fl = []func(io.Writer) error{pr.OnFlush}
 		}
-		debuglog.ImgRender("RenderBlock: key=%s decision=prerendered proto=%v target=(%d,%d)",
-			key, r.ctx.Protocol, target.X, target.Y)
+		debuglog.ImgRender("RenderBlock: key=%s decision=prerendered proto=%v target=(%d,%d) onflush=%v flushes=%d",
+			key, r.ctx.Protocol, target.X, target.Y, pr.OnFlush != nil, len(fl))
 		return BlockResult{Lines: pr.Lines, Flushes: fl, SixelRows: sxlMap, Height: target.Y, Hit: hit}
 	}
 

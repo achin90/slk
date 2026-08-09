@@ -521,6 +521,20 @@ func (m *Model) UpdateMessageInPlace(ts, newText string) bool {
 	return false
 }
 
+// UpdateMessageFull replaces the entire reply identified by ts with
+// the supplied MessageItem. Used when Slack sends a message_changed
+// event with updated attachment metadata (e.g. thumbnails ready).
+func (m *Model) UpdateMessageFull(ts string, msg messages.MessageItem) bool {
+	for i := range m.replies {
+		if m.replies[i].TS == ts {
+			m.replies[i] = msg
+			m.InvalidateCache()
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveMessageByTS removes a reply by TS, adjusting the selected
 // index so it remains valid. Returns true if found.
 func (m *Model) RemoveMessageByTS(ts string) bool {
@@ -552,6 +566,18 @@ func (m *Model) UpdateParentInPlace(ts, newText string) bool {
 	}
 	m.parent.Text = newText
 	m.parent.IsEdited = true
+	m.InvalidateCache()
+	return true
+}
+
+// UpdateParentFull replaces the entire parent MessageItem if its TS
+// matches. Used when Slack sends a message_changed event with updated
+// attachment metadata for the thread parent.
+func (m *Model) UpdateParentFull(ts string, msg messages.MessageItem) bool {
+	if m.parent.TS != ts {
+		return false
+	}
+	m.parent = msg
 	m.InvalidateCache()
 	return true
 }
@@ -1988,11 +2014,14 @@ func (m *Model) renderThreadMessage(msg messages.MessageItem, width int, userNam
 				imgThumbs[i] = imgrender.ThumbSpec{URL: t.URL, W: t.W, H: t.H}
 			}
 			res := m.imgRenderer.RenderBlock(imgrender.Block{
-				Kind:   att.Kind,
-				FileID: att.FileID,
-				Name:   att.Name,
-				URL:    att.URL,
-				Thumbs: imgThumbs,
+				Kind:        att.Kind,
+				FileID:      att.FileID,
+				Name:        att.Name,
+				URL:         att.URL,
+				Thumbs:      imgThumbs,
+				OriginalW:   att.OriginalW,
+				OriginalH:   att.OriginalH,
+				FallbackURL: att.FallbackURL,
 			}, m.channelID, msg.TS, contentWidth, 0 /* baseRow */, attIdx, 0 /* contentColBase */)
 			blocks = append(blocks, strings.Join(res.Lines, "\n"))
 			flushes = append(flushes, res.Flushes...)

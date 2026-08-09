@@ -983,6 +983,12 @@ func run() error {
 	proto := imgpkg.Detect(imgpkg.CaptureEnv(), cfg.Appearance.ImageProtocol)
 	debuglog.ImgRender("image protocol detect: cfg=%q result=%s", cfg.Appearance.ImageProtocol, proto)
 
+	// kittyCellPxW/H are populated by the kitty graphics protocol
+	// window-size probe below (when it succeeds). They override the
+	// TIOCGWINSZ-derived cell pixels at the SetCellPixels call further
+	// down. Zero means the probe didn't run or didn't succeed.
+	var kittyCellPxW, kittyCellPxH int
+
 	// Optional: run kitty version probe if detected as kitty AND stdin is a TTY.
 	// Must happen BEFORE bubbletea takes over the terminal.
 	if proto == imgpkg.ProtoKitty && term.IsTerminal(int(os.Stdin.Fd())) {
@@ -991,6 +997,19 @@ func run() error {
 			debuglog.ImgRender("kitty probe skipped: cannot enter raw mode: %v", err)
 		} else {
 			ok := imgpkg.ProbeKittyGraphics(os.Stdout, os.Stdin, 200*time.Millisecond)
+			if ok {
+				// While stdin is still in raw mode, query the kitty
+				// graphics protocol for the terminal's window size to
+				// derive accurate per-cell pixel dimensions. This is
+				// more reliable than TIOCGWINSZ inside tmux, where the
+				// ioctl may report pixel dimensions that don't match
+				// what the kitty graphics protocol uses for rendering.
+				// The result (if successful) overrides the
+				// TIOCGWINSZ-derived cell pixels below.
+				if cw, ch, pok := imgpkg.ProbeKittyCellPixels(os.Stdout, os.Stdin, 200*time.Millisecond); pok {
+					kittyCellPxW, kittyCellPxH = cw, ch
+				}
+			}
 			if rerr := term.Restore(int(os.Stdin.Fd()), state); rerr != nil {
 				debuglog.ImgRender("term restore after kitty probe: %v", rerr)
 			}
@@ -1027,8 +1046,17 @@ func run() error {
 	// per visible avatar per redraw would dominate the bandwidth budget.
 	avatarCache := avatar.NewCache(imageFetcher, imgpkg.KittyRendererInstance(), proto == imgpkg.ProtoKitty)
 
-	// Cell pixel metrics for sizing decisions.
+	// Cell pixel metrics for sizing decisions. Prefer the kitty
+	// graphics protocol's own window-size query (more reliable inside
+	// tmux, where TIOCGWINSZ may report pixel dimensions that don't
+	// match the kitty rendering coordinate system) when available;
+	// fall back to TIOCGWINSZ, then to the 8x16 default.
 	pxW, pxH := imgpkg.CellPixels(int(os.Stdout.Fd()))
+	if kittyCellPxW > 0 && kittyCellPxH > 0 {
+		debuglog.ImgRender("cell pixels: using kitty probe (%dx%d) over TIOCGWINSZ (%dx%d)",
+			kittyCellPxW, kittyCellPxH, pxW, pxH)
+		pxW, pxH = kittyCellPxW, kittyCellPxH
+	}
 	debuglog.ImgRender("cell pixels: %dx%d", pxW, pxH)
 	// Sixel encodes at absolute pixel dimensions — the terminal paints
 	// one sixel pixel per device pixel rather than scaling into a cell
@@ -1036,6 +1064,7 @@ func run() error {
 	// occupying N rows of layout is encoded N*cellHeight pixels tall and
 	// actually lands on those rows.
 	imgpkg.SetCellPixels(pxW, pxH)
+	imgpkg.KittyRendererInstance().SetCellPixels(pxW, pxH)
 
 	// Wire the inline-image pipeline into the messages pane. SendMsg
 	// stays nil here because tea.NewProgram has not run yet; we re-call
@@ -1649,8 +1678,32 @@ func run() error {
 						currentCaption = caption
 					}
 
-					if _, err := client.UploadFile(ctx, channelID, threadTS, att.Filename, reader, att.Size, currentCaption); err != nil {
+					fileSummary, err := client.UploadFile(ctx, channelID, threadTS, att.Filename, reader, att.Size, currentCaption)
+					if err != nil {
 						return ui.UploadResultMsg{Err: fmt.Errorf("uploading %s (%d/%d): %w", att.Filename, i+1, len(attachments), err)}
+					}
+
+					// Pre-seed the image cache with the local bytes so
+					// the renderer uses the full-resolution image
+					// instead of fetching small thumbnails from Slack.
+					// The cache key must match what RenderBlock will
+					// generate: fileID + "-" + max(origW, origH).
+					if att.Bytes != nil && fileSummary != nil && fileSummary.ID != "" {
+						if img, _, err := image.Decode(bytes.NewReader(att.Bytes)); err == nil {
+							bounds := img.Bounds()
+							origW, origH := bounds.Dx(), bounds.Dy()
+							maxDim := origW
+							if origH > maxDim {
+								maxDim = origH
+							}
+							cacheKey := fileSummary.ID + "-" + strconv.Itoa(maxDim)
+							imageFetcher.SeedCache(cacheKey, att.Bytes)
+							p.Send(ui.LocalImageSeededMsg{
+								FileID: fileSummary.ID,
+								OrigW:  origW,
+								OrigH:  origH,
+							})
+						}
 					}
 				}
 				p.Send(ui.UploadProgressMsg{Done: len(attachments), Total: len(attachments)})
@@ -2064,16 +2117,14 @@ func run() error {
 				LastChannelID:    mostRecentlyVisitedChannel(wctx.LastVisitedByChannel),
 			})
 
-			// Fetch workspace custom emojis in the background. When done,
-			// send a follow-up so the active compose can refresh its
-			// emoji picker entries. Best-effort: failure leaves the picker
-			// using built-ins only.
+			// Fetch the full workspace custom emoji list in the
+			// background. conversations.view may return only a partial
+			// set (emojis referenced in visible messages), so we always
+			// fetch the authoritative list via emoji.list and dispatch
+			// a follow-up so the active compose can refresh its emoji
+			// picker entries. Best-effort: failure leaves the picker
+			// using whatever conversations.view provided (or built-ins).
 			go func(teamID string) {
-				// Nothing to fetch when conversations.view already
-				// returned them, which is the normal path.
-				if len(wctx.CustomEmoji) > 0 {
-					return
-				}
 				emojis, err := wctx.Client.ListCustomEmoji(ctx)
 				if err != nil {
 					return
@@ -2664,6 +2715,9 @@ func extractAttachments(files []slack.File) []messages.Attachment {
 			att.FileID = f.ID
 			att.Mime = f.Mimetype
 			att.Thumbs = collectThumbs(f)
+			att.OriginalW = f.OriginalW
+			att.OriginalH = f.OriginalH
+			att.FallbackURL = f.URLPrivate
 		}
 		out = append(out, att)
 	}
@@ -2720,6 +2774,13 @@ func pickAttachmentURL(f slack.File, kind string) string {
 		return f.Permalink
 	}
 	return f.URLPrivate
+}
+
+func truncateURL(s string) string {
+	if len(s) > 50 {
+		return s[len(s)-50:]
+	}
+	return s
 }
 
 // lookupUserCached returns the display name for userID using only
@@ -4046,6 +4107,15 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	}
 	debuglog.Cache("OnMessage: team=%s channel=%s ts=%s subtype=%q thread_ts=%s decision=dispatched_to_app",
 		h.workspaceID, channelID, ts, subtype, threadTS)
+	atts := extractAttachments(files)
+	for i, att := range atts {
+		thumbStrs := make([]string, len(att.Thumbs))
+		for j, th := range att.Thumbs {
+			thumbStrs[j] = fmt.Sprintf("%dx%d:%s", th.W, th.H, truncateURL(th.URL))
+		}
+		debuglog.Cache("OnMessage ATTACHMENT idx=%d kind=%s file_id=%s orig=%dx%d thumbs=[%s] fallback=%s",
+			i, att.Kind, att.FileID, att.OriginalW, att.OriginalH, strings.Join(thumbStrs, ", "), truncateURL(att.FallbackURL))
+	}
 	if h.program != nil {
 		h.program.Send(ui.NewMessageMsg{
 			ChannelID: channelID,
@@ -4058,7 +4128,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 				ThreadTS:          threadTS,
 				Subtype:           subtype,
 				IsEdited:          edited,
-				Attachments:       extractAttachments(files),
+				Attachments:       atts,
 				Blocks:            extractBlocks(blocks),
 				LegacyAttachments: extractLegacyAttachments(attachments),
 			},

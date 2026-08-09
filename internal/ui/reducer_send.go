@@ -200,6 +200,17 @@ var reduceSend reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 			a.CloseThread()
 		}
 		return nil, true
+	case LocalImageSeededMsg:
+		// The uploader decoded the local image bytes and wrote them
+		// to the fetcher's disk cache. Store the dimensions so
+		// reduceNewMessage can add the original as a thumb when our
+		// own paste message arrives.
+		if a.localImages == nil {
+			a.localImages = map[string]localImageInfo{}
+		}
+		a.localImages[m.FileID] = localImageInfo{OrigW: m.OrigW, OrigH: m.OrigH}
+		debuglog.Cache("LocalImageSeededMsg: file_id=%s orig=%dx%d", m.FileID, m.OrigW, m.OrigH)
+		return nil, true
 	}
 	return nil, false
 }
@@ -212,21 +223,23 @@ func reduceNewMessage(a *App, m NewMessageMsg) tea.Cmd {
 	debuglog.Cache("NewMessageMsg: channel=%s ts=%s thread_ts=%s active=%s",
 		m.ChannelID, m.Message.TS, m.Message.ThreadTS, a.activeChannelID)
 	if m.Message.IsEdited {
-		debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=skipped_edit_echo",
+		debuglog.Cache("NewMessageMsg: channel=%s ts=%s decision=edit_echo_full_replace",
 			m.ChannelID, m.Message.TS)
-		// Edit echo: update existing message in place rather than
-		// appending. Fan out to every window viewing the channel;
-		// gate on the thread panel's channel for the thread cache
-		// -- avoids touching panes showing a different channel.
-		// This branch must run BEFORE the isSelfSent dedup below,
-		// since edits to messages we recently sent would otherwise
-		// be silently dropped (the TS is still in selfSentTSes).
+		// Edit echo: replace the existing message in place rather
+		// than appending. We must use the full MessageItem (not just
+		// the text) because Slack uses message_changed for both real
+		// edits AND silent metadata refreshes — most notably when
+		// thumbnail generation finishes for a freshly uploaded
+		// image. A text-only update would leave stale/empty thumb
+		// metadata, causing images to render tiny or not at all.
+		// This branch runs BEFORE isSelfSent dedup so edits to our
+		// own messages are never dropped.
 		for _, mm := range a.modelsForChannel(m.ChannelID) {
-			mm.UpdateMessageInPlace(m.Message.TS, m.Message.Text)
+			mm.UpdateMessageFull(m.Message.TS, m.Message)
 		}
 		if m.ChannelID == a.threadPanel.ChannelID() {
-			a.threadPanel.UpdateMessageInPlace(m.Message.TS, m.Message.Text)
-			a.threadPanel.UpdateParentInPlace(m.Message.TS, m.Message.Text)
+			a.threadPanel.UpdateMessageFull(m.Message.TS, m.Message)
+			a.threadPanel.UpdateParentFull(m.Message.TS, m.Message)
 		}
 		return nil
 	}
@@ -256,6 +269,40 @@ func reduceNewMessage(a *App, m NewMessageMsg) tea.Cmd {
 			m.ChannelID, m.Message.TS)
 		return nil
 	}
+	// For locally-pasted images, add the full-resolution original as
+	// a thumb. The uploader pre-seeded the fetcher's disk cache with
+	// the original bytes at upload time (LocalImageSeededMsg). By
+	// adding the original as a thumb with the correct dimensions,
+	// PickThumb will choose it (largest), the cache key will match
+	// the pre-seeded entry, and RenderBlock will render at full
+	// quality without any HTTP fetch.
+	if a.localImages != nil {
+		for i := range m.Message.Attachments {
+			att := &m.Message.Attachments[i]
+			if att.Kind != "image" || att.FileID == "" {
+				continue
+			}
+			if local, ok := a.localImages[att.FileID]; ok {
+				// Use the fallback URL (the full-res file URL) as
+				// the thumb URL. The fetcher won't actually fetch
+				// it — the cache is pre-seeded — but the URL must
+				// be non-empty so RenderBlock doesn't skip it.
+				origURL := att.FallbackURL
+				if origURL == "" {
+					origURL = "local://" + att.FileID
+				}
+				att.Thumbs = append(att.Thumbs, messages.ThumbSpec{
+					URL: origURL,
+					W:   local.OrigW,
+					H:   local.OrigH,
+				})
+				debuglog.Cache("NewMessageMsg: added local original thumb file_id=%s orig=%dx%d thumbs=%d",
+					att.FileID, local.OrigW, local.OrigH, len(att.Thumbs))
+				delete(a.localImages, att.FileID)
+			}
+		}
+	}
+
 	// Model writes fan out to EVERY window viewing the channel,
 	// focused or not (Phase 3): visible-but-unfocused windows show
 	// realtime traffic too.

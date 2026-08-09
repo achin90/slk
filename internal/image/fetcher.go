@@ -153,6 +153,16 @@ func NewFetcher(cache *Cache, client *http.Client) *Fetcher {
 // fallback auths are tried for foreign-team URLs (Slack Connect).
 // Safe to call once at startup; not safe to mutate the input slice
 // afterward.
+// SeedCache writes raw image bytes to the disk cache under the given
+// key, so a subsequent Fetch for that key finds a cache hit and skips
+// HTTP entirely. Used by the paste-upload flow: when the user pastes
+// an image from the clipboard, the full-resolution bytes are already
+// in memory, so we seed the cache and avoid fetching small thumbnails
+// from Slack's CDN.
+func (f *Fetcher) SeedCache(key string, data []byte) error {
+	return f.cache.Seed(key, data)
+}
+
 func (f *Fetcher) SetAuths(auths []TeamAuth) {
 	byTeam := make(map[string]TeamAuth, len(auths))
 	fallbacks := make([]TeamAuth, 0, len(auths))
@@ -551,12 +561,23 @@ func teamIDFromFilesURL(rawURL string) string {
 	return ""
 }
 
-// downscale fits img within target preserving the renderer's expectation;
-// the renderer always wants exactly target pixels — so we always scale.
-// (Avoids an extra branch and image-copy path.)
+// downscale scales img to fit within target, preserving the source's
+// aspect ratio (one dimension may come out smaller than target). The
+// kitty renderer letterboxes the result onto its exact cell-grid
+// canvas, so cell-quantization distortion never reaches the pixels.
 func downscale(img image.Image, target image.Point) image.Image {
-	dst := image.NewRGBA(image.Rect(0, 0, target.X, target.Y))
-	draw.BiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
+	b := img.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	fitW, fitH := target.X, target.Y
+	if sw > 0 && sh > 0 {
+		if sw*target.Y >= sh*target.X {
+			fitH = max(1, sh*target.X/sw)
+		} else {
+			fitW = max(1, sw*target.Y/sh)
+		}
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, fitW, fitH))
+	draw.BiLinear.Scale(dst, dst.Bounds(), img, b, draw.Over, nil)
 	return dst
 }
 

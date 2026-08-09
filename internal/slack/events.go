@@ -2,6 +2,7 @@ package slackclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -299,8 +300,12 @@ func dispatchWebSocketEvent(data []byte, handler EventHandler) {
 			handler.OnMessage(msg.Channel, msg.User, msg.TS, msg.Text, msg.ThreadTS, msg.SubType, false, msg.Files, msg.Blocks, msg.Attachments, msg.BotID, msg.Username)
 		case "message_changed":
 			if msg.Message != nil {
-				debuglog.WS("message_changed: channel=%s user=%s ts=%s thread_ts=%s edited=true",
-					msg.Channel, msg.Message.User, msg.Message.TS, msg.Message.ThreadTS)
+				for _, f := range msg.Message.Files {
+					debuglog.WS("message_changed FILE: id=%s name=%q orig=%dx%d thumbs=%v",
+						f.ID, f.Name, f.OriginalW, f.OriginalH, fileThumbSummary(f))
+				}
+				debuglog.WS("message_changed: channel=%s user=%s ts=%s thread_ts=%s edited=true files=%d",
+					msg.Channel, msg.Message.User, msg.Message.TS, msg.Message.ThreadTS, len(msg.Message.Files))
 				handler.OnMessage(msg.Channel, msg.Message.User, msg.Message.TS, msg.Message.Text, msg.Message.ThreadTS, "", true, msg.Message.Files, msg.Message.Blocks, msg.Message.Attachments, msg.Message.BotID, msg.Message.Username)
 			}
 		case "message_deleted":
@@ -510,4 +515,29 @@ func computeDNDState(s wsDNDStatusInner, now int64) (bool, int64) {
 		return true, s.NextDNDEndTS
 	}
 	return false, 0
+}
+
+func fileThumbSummary(f slack.File) string {
+	var b strings.Builder
+	b.WriteString("[")
+	if f.Thumb360 != "" {
+		fmt.Fprintf(&b, "360:%s(%dx%d) ", f.Thumb360, f.Thumb360W, f.Thumb360H)
+	}
+	if f.Thumb480 != "" {
+		fmt.Fprintf(&b, "480:%s(%dx%d) ", f.Thumb480, f.Thumb480W, f.Thumb480H)
+	}
+	if f.Thumb720 != "" {
+		fmt.Fprintf(&b, "720:%s(%dx%d) ", f.Thumb720, f.Thumb720W, f.Thumb720H)
+	}
+	if f.Thumb960 != "" {
+		fmt.Fprintf(&b, "960:%s(%dx%d) ", f.Thumb960, f.Thumb960W, f.Thumb960H)
+	}
+	if f.Thumb1024 != "" {
+		fmt.Fprintf(&b, "1024:%s(%dx%d) ", f.Thumb1024, f.Thumb1024W, f.Thumb1024H)
+	}
+	if b.Len() == 1 {
+		b.WriteString("none")
+	}
+	b.WriteString("]")
+	return b.String()
 }
