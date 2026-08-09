@@ -1341,6 +1341,24 @@ func run() error {
 			return ids
 		})
 
+		app.SetWorkspaceMentionReader(func() map[string]int {
+			ids, err := db.WorkspacesWithUnreads()
+			if err != nil {
+				log.Printf("Warning: WorkspacesWithUnreads for mentions: %v", err)
+				return nil
+			}
+			out := make(map[string]int, len(ids))
+			for _, id := range ids {
+				count, err := db.MentionCountForWorkspace(id)
+				if err != nil {
+					log.Printf("Warning: MentionCountForWorkspace %s: %v", id, err)
+					continue
+				}
+				out[id] = count
+			}
+			return out
+		})
+
 		app.SetChannelService(ui.NewChannelService(ui.ChannelServiceFuncs{
 			RecordVisit: func(channelID ids.ChannelID) {
 				chIDStr := string(channelID)
@@ -2632,9 +2650,10 @@ func connectWorkspace(ctx context.Context, token slackclient.Token, db *cache.DB
 		updates := make([]cache.ChannelReadStateUpdate, 0, len(unreadCounts))
 		for _, u := range unreadCounts {
 			updates = append(updates, cache.ChannelReadStateUpdate{
-				ChannelID:  u.ChannelID,
-				LastReadTS: u.LastRead, // may be ""; ReplaceWorkspaceReadState preserves existing in that case
-				HasUnread:  u.HasUnread,
+				ChannelID:    u.ChannelID,
+				LastReadTS:   u.LastRead, // may be ""; ReplaceWorkspaceReadState preserves existing in that case
+				HasUnread:    u.HasUnread,
+				MentionCount: u.MentionCount,
 			})
 		}
 		if err := db.ReplaceWorkspaceReadState(client.TeamID(), updates); err != nil {
@@ -4067,6 +4086,33 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
 		if err := h.db.UpdateChannelReadState(channelID, "", true); err != nil {
 			log.Printf("Warning: failed to set has_unread for %s: %v", channelID, err)
+		}
+	}
+
+	// Mention count: increment when the incoming message is a DM,
+	// @mention, @here/@channel/@everyone, or keyword hit — the things
+	// that drive Slack's dock badge number. This runs independently of
+	// notification settings (on_mention/on_dm/on_keyword control OS
+	// notifications, not the badge count) and DND (mentions accumulate
+	// during DND, they just don't notify). Muted channels and
+	// self-messages are excluded. Reuses ShouldNotify with all triggers
+	// enabled and DND suppressed.
+	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
+		mentionCtx := notify.NotifyContext{
+			CurrentUserID:   h.currentUserID,
+			ActiveChannelID: activeChIDForRead,
+			IsActiveWS:      h.isActive != nil && h.isActive(),
+			OnMention:       true,
+			OnDM:            true,
+			OnKeyword:       h.notifyCfg.OnKeyword,
+			IsDND:           false,
+			IsMuted:         h.wsCtx != nil && h.wsCtx.MuteStore != nil && h.wsCtx.MuteStore.IsMuted(channelID),
+		}
+		chType := h.channelTypes[channelID]
+		if notify.ShouldNotify(mentionCtx, channelID, userID, text, chType) {
+			if err := h.db.IncrementChannelMentionCount(channelID, 1); err != nil {
+				debuglog.Cache("OnMessage: increment mention count %s: %v", channelID, err)
+			}
 		}
 	}
 

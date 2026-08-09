@@ -23,6 +23,10 @@ type Model struct {
 	// have at least one channel with has_unread=true. Set by App via
 	// SetUnreadReader; called by RefreshUnreads.
 	unreadReader func() []string
+	// mentionReader returns a map of workspaceID → total mention count
+	// (the "dock badge number" for that workspace). Set by App via
+	// SetMentionReader; called by OtherMentionCount.
+	mentionReader func() map[string]int
 }
 
 // Version returns a counter that increments any time the View() output could
@@ -71,6 +75,24 @@ func (m *Model) OtherUnreadCount(activeID string) int {
 	return count
 }
 
+// OtherMentionCount returns the total mention count across all
+// workspaces excluding activeID. Reads through the installed
+// mentionReader; returns 0 when no reader is set. Not mute-filtered
+// (mute state is only available for the active workspace's sidebar);
+// the active workspace's count IS mute-filtered via the sidebar.
+func (m *Model) OtherMentionCount(activeID string) int {
+	if m.mentionReader == nil {
+		return 0
+	}
+	total := 0
+	for id, count := range m.mentionReader() {
+		if id != activeID {
+			total += count
+		}
+	}
+	return total
+}
+
 func (m *Model) SelectedIndex() int {
 	return m.selected
 }
@@ -117,6 +139,12 @@ func (m *Model) SetUnread(teamID string, hasUnread bool) {
 // SetUnreadReader installs the callback used by RefreshUnreads.
 func (m *Model) SetUnreadReader(f func() []string) {
 	m.unreadReader = f
+}
+
+// SetMentionReader installs the callback used by OtherMentionCount to
+// get per-workspace mention counts.
+func (m *Model) SetMentionReader(f func() map[string]int) {
+	m.mentionReader = f
 }
 
 // RefreshUnreads pulls the latest set of workspaces-with-unreads from

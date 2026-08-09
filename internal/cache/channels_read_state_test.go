@@ -9,7 +9,7 @@ func newRSChannel(t *testing.T, db *DB, id, workspaceID string) {
 	if err := db.UpsertWorkspace(Workspace{ID: workspaceID, Name: "ws"}); err != nil {
 		t.Fatalf("UpsertWorkspace: %v", err)
 	}
-	if err := db.UpsertChannel(Channel{ID: id, WorkspaceID: workspaceID, Name: id, Type: "channel"}); err != nil {
+	if err := db.UpsertChannel(Channel{ID: id, WorkspaceID: workspaceID, Name: id, Type: "channel", IsMember: true}); err != nil {
 		t.Fatalf("UpsertChannel: %v", err)
 	}
 }
@@ -315,5 +315,145 @@ func TestUpsertChannel_DoesNotClobberReadState(t *testing.T) {
 	}
 	if !state.HasUnread {
 		t.Errorf("HasUnread = false after upsert (clobber regression!)")
+	}
+}
+
+func TestIncrementChannelMentionCount(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+	newRSChannel(t, db, "C1", "T1")
+	newRSChannel(t, db, "C2", "T1")
+
+	// Increment C1 twice, C2 once.
+	if err := db.IncrementChannelMentionCount("C1", 1); err != nil {
+		t.Fatalf("increment C1: %v", err)
+	}
+	if err := db.IncrementChannelMentionCount("C1", 1); err != nil {
+		t.Fatalf("increment C1 again: %v", err)
+	}
+	if err := db.IncrementChannelMentionCount("C2", 1); err != nil {
+		t.Fatalf("increment C2: %v", err)
+	}
+
+	// Verify per-channel counts.
+	s1, _ := db.GetChannelReadState("C1")
+	if s1.MentionCount != 2 {
+		t.Errorf("C1 MentionCount = %d want 2", s1.MentionCount)
+	}
+	if !s1.HasUnread {
+		t.Errorf("C1 HasUnread = false after mention increment")
+	}
+	s2, _ := db.GetChannelReadState("C2")
+	if s2.MentionCount != 1 {
+		t.Errorf("C2 MentionCount = %d want 1", s2.MentionCount)
+	}
+
+	// Workspace total.
+	total, err := db.MentionCountForWorkspace("T1")
+	if err != nil {
+		t.Fatalf("MentionCountForWorkspace: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("workspace mention total = %d want 3", total)
+	}
+
+	// Reading C1 resets its mention_count to 0.
+	if err := db.UpdateChannelReadState("C1", "1.0", false); err != nil {
+		t.Fatalf("UpdateChannelReadState read: %v", err)
+	}
+	s1, _ = db.GetChannelReadState("C1")
+	if s1.MentionCount != 0 {
+		t.Errorf("C1 MentionCount after read = %d want 0", s1.MentionCount)
+	}
+	total, _ = db.MentionCountForWorkspace("T1")
+	if total != 1 {
+		t.Errorf("workspace mention total after reading C1 = %d want 1", total)
+	}
+}
+
+func TestReplaceWorkspaceReadState_WritesMentionCount(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+	newRSChannel(t, db, "C1", "T1")
+	newRSChannel(t, db, "C2", "T1")
+
+	// Bootstrap snapshot with mention counts.
+	updates := []ChannelReadStateUpdate{
+		{ChannelID: "C1", LastReadTS: "1.0", HasUnread: true, MentionCount: 3},
+		{ChannelID: "C2", LastReadTS: "2.0", HasUnread: true, MentionCount: 0},
+	}
+	if err := db.ReplaceWorkspaceReadState("T1", updates); err != nil {
+		t.Fatalf("ReplaceWorkspaceReadState: %v", err)
+	}
+
+	s1, _ := db.GetChannelReadState("C1")
+	if s1.MentionCount != 3 {
+		t.Errorf("C1 MentionCount = %d want 3", s1.MentionCount)
+	}
+
+	// Total should be 3 (C1 has 3, C2 has 0).
+	total, _ := db.MentionCountForWorkspace("T1")
+	if total != 3 {
+		t.Errorf("workspace mention total = %d want 3", total)
+	}
+
+	// A second replace resets everything and only sets C1.
+	updates2 := []ChannelReadStateUpdate{
+		{ChannelID: "C1", LastReadTS: "1.5", HasUnread: true, MentionCount: 5},
+	}
+	if err := db.ReplaceWorkspaceReadState("T1", updates2); err != nil {
+		t.Fatalf("ReplaceWorkspaceReadState 2: %v", err)
+	}
+	s1, _ = db.GetChannelReadState("C1")
+	if s1.MentionCount != 5 {
+		t.Errorf("C1 MentionCount after second replace = %d want 5", s1.MentionCount)
+	}
+	// C2 was absent from updates2, so it's reset.
+	s2, _ := db.GetChannelReadState("C2")
+	if s2.HasUnread {
+		t.Errorf("C2 should be read after replace without it in updates")
+	}
+	if s2.MentionCount != 0 {
+		t.Errorf("C2 MentionCount = %d want 0 (reset by replace)", s2.MentionCount)
+	}
+}
+
+func TestBatchUpdateChannelReadState_PreservesMentionCount(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+	newRSChannel(t, db, "C1", "T1")
+
+	// Set initial mention_count via a batch with explicit count.
+	if err := db.BatchUpdateChannelReadState([]ChannelReadStateUpdate{
+		{ChannelID: "C1", LastReadTS: "1.0", HasUnread: true, MentionCount: 3},
+	}); err != nil {
+		t.Fatalf("batch 1: %v", err)
+	}
+	s, _ := db.GetChannelReadState("C1")
+	if s.MentionCount != 3 {
+		t.Fatalf("initial MentionCount = %d want 3", s.MentionCount)
+	}
+
+	// Batch with MentionCount=-1 preserves the existing count.
+	if err := db.BatchUpdateChannelReadState([]ChannelReadStateUpdate{
+		{ChannelID: "C1", LastReadTS: "2.0", HasUnread: true, MentionCount: -1},
+	}); err != nil {
+		t.Fatalf("batch 2: %v", err)
+	}
+	s, _ = db.GetChannelReadState("C1")
+	if s.MentionCount != 3 {
+		t.Errorf("C1 MentionCount after preserve = %d want 3 (preserved)", s.MentionCount)
+	}
+	if s.LastReadTS != "2.0" {
+		t.Errorf("C1 LastReadTS = %q want 2.0 (updated)", s.LastReadTS)
 	}
 }

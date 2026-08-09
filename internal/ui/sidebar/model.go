@@ -386,6 +386,25 @@ func (m *Model) NextUnread(afterID string, dir int) (id, name, chType string, ok
 	return "", "", "", false
 }
 
+// MentionCount returns the total mention_count across all unmuted,
+// unread channels in the sidebar. This is the "dock badge number" —
+// DMs, @mentions, @here/@channel, and keyword hits that need a
+// response. Muted channels are excluded, matching Slack's behavior.
+// Returns 0 when no reader is installed.
+func (m *Model) MentionCount() int {
+	if m.readStateReader == nil {
+		return 0
+	}
+	state := m.readStateReader()
+	total := 0
+	for _, item := range m.items {
+		if item.IsVisiblyUnread(state[item.ID]) {
+			total += state[item.ID].MentionCount
+		}
+	}
+	return total
+}
+
 // Invalidate forces the next View() call to re-read read state from
 // the installed reader. Called by App.Update on ReadStateChangedMsg.
 func (m *Model) Invalidate() {

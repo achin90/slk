@@ -42,11 +42,15 @@ quiet_hours = "22:00-08:00"   # planned
 # order, and under a burst intermediate states may be skipped — the newest
 # state always runs last, so the surface converges on the current state.
 # Executed via `sh -c` with:
-#   $SLK_UNREAD        unread channels in the active workspace (mute-filtered)
-#   $SLK_OTHER_UNREAD  unread count across other workspaces
-#   $SLK_WORKSPACE     active workspace name
-#   $SLK_TITLE         the window-title string, e.g. "slk SW (3) +1"
-# status_command = 'my-statusbar --slack-unread "$SLK_UNREAD"'
+#   $SLK_UNREAD          unread channels in the active workspace (mute-filtered)
+#   $SLK_OTHER_UNREAD    unread count across other workspaces
+#   $SLK_MENTIONS        DM/mention/keyword count in the active workspace
+#                        (the "dock badge number" — mute-filtered)
+#   $SLK_OTHER_MENTIONS  DM/mention/keyword count across other workspaces
+#                        (not mute-filtered; may slightly overcount)
+#   $SLK_WORKSPACE       active workspace name
+#   $SLK_TITLE           the window-title string, e.g. "slk SW (3) +1"
+# status_command = 'my-statusbar --slack-unread "$SLK_UNREAD" --slack-mentions "$SLK_MENTIONS"'
 
 # Both hooks require a POSIX `sh` on $PATH and are unavailable on Windows
 # (the built-in OS notification still works there). Hook failures are silent

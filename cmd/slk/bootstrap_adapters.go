@@ -115,10 +115,11 @@ func (a countsAdapter) Counts(_ context.Context) (bootstrap.Counts, error) {
 	}
 	for _, u := range unreads {
 		out.Unreads = append(out.Unreads, bootstrap.Unread{
-			ChannelID: u.ChannelID,
-			Count:     u.Count,
-			HasUnread: u.HasUnread,
-			LastRead:  u.LastRead,
+			ChannelID:    u.ChannelID,
+			Count:        u.Count,
+			MentionCount: u.MentionCount,
+			HasUnread:    u.HasUnread,
+			LastRead:     u.LastRead,
 		})
 	}
 	return out, nil

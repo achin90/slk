@@ -924,10 +924,11 @@ func (c *Client) UploadFile(
 
 // UnreadInfo holds the unread state for a single channel.
 type UnreadInfo struct {
-	ChannelID string
-	Count     int
-	HasUnread bool
-	LastRead  string // Slack message timestamp
+	ChannelID    string
+	Count        int
+	MentionCount int // raw mention count from Slack's API (the "dock badge" number)
+	HasUnread    bool
+	LastRead     string // Slack message timestamp
 }
 
 // ThreadsAggregate captures Slack's server-side notion of whether the
@@ -1018,6 +1019,7 @@ func (c *Client) GetUnreadCounts() ([]UnreadInfo, ThreadsAggregate, error) {
 			HasUnread: ch.HasUnreads,
 		}
 		if ch.HasUnreads {
+			info.MentionCount = ch.MentionCount
 			info.Count = ch.MentionCount
 			if info.Count == 0 {
 				info.Count = 1 // has unreads but no mention count
@@ -1032,6 +1034,7 @@ func (c *Client) GetUnreadCounts() ([]UnreadInfo, ThreadsAggregate, error) {
 			HasUnread: ch.HasUnreads,
 		}
 		if ch.HasUnreads {
+			info.MentionCount = ch.MentionCount
 			info.Count = max(ch.MentionCount, 1)
 		}
 		unreads = append(unreads, info)
@@ -1043,6 +1046,9 @@ func (c *Client) GetUnreadCounts() ([]UnreadInfo, ThreadsAggregate, error) {
 			HasUnread: ch.HasUnreads,
 		}
 		if ch.HasUnreads {
+			// IMs don't carry a mention_count field — every unread DM
+			// counts as 1 toward the dock badge.
+			info.MentionCount = 1
 			info.Count = 1
 		}
 		unreads = append(unreads, info)

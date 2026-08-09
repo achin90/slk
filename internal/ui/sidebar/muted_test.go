@@ -182,3 +182,35 @@ func TestUnreadChannelCount_EmptySidebar(t *testing.T) {
 		t.Errorf("UnreadChannelCount with no items = %d want 0", got)
 	}
 }
+
+// TestMentionCount_FiltersMute proves the mention count uses
+// IsVisiblyUnread -- muted channels are excluded from the total,
+// matching the dock badge behavior.
+func TestMentionCount_FiltersMute(t *testing.T) {
+	m := New([]ChannelItem{
+		{ID: "C1", Name: "a", Type: "channel", IsMuted: false},
+		{ID: "C2", Name: "b", Type: "channel", IsMuted: false},
+		{ID: "C3", Name: "c", Type: "channel", IsMuted: true},
+		{ID: "C4", Name: "d", Type: "channel", IsMuted: false},
+	})
+	m.SetReadStateReader(func() map[string]cache.ReadState {
+		return map[string]cache.ReadState{
+			"C1": {HasUnread: true, MentionCount: 3},  // 3 mentions
+			"C2": {HasUnread: false, MentionCount: 0}, // read
+			"C3": {HasUnread: true, MentionCount: 5},  // muted: excluded
+			"C4": {HasUnread: true, MentionCount: 1},  // 1 mention
+		}
+	})
+	if got := m.MentionCount(); got != 4 {
+		t.Errorf("MentionCount = %d want 4 (C1:3 + C4:1, C3 muted)", got)
+	}
+}
+
+func TestMentionCount_NoReader(t *testing.T) {
+	m := New([]ChannelItem{
+		{ID: "C1", Name: "general", Type: "channel"},
+	})
+	if got := m.MentionCount(); got != 0 {
+		t.Errorf("MentionCount with no reader = %d want 0", got)
+	}
+}

@@ -135,5 +135,7 @@ var defaultClipboardWriter clipboardWriter = clipboard.Write
 // StatusReportFunc mirrors slk's unread state onto an external surface. It is
 // called by notifyReadStateChanged on every read-state change with the
 // active-workspace unread count, the other-workspace unread count, the active
-// workspace name, and the window-title string. See notifications.status_command.
-type StatusReportFunc func(unread, otherUnread int, workspace, title string)
+// workspace mention count (DMs + @mentions + keywords — the "dock badge
+// number"), the other-workspace mention count, the active workspace name, and
+// the window-title string. See notifications.status_command.
+type StatusReportFunc func(unread, otherUnread, mentions, otherMentions int, workspace, title string)

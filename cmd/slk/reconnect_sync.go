@@ -131,9 +131,10 @@ func (r *reconnectSync) refreshUnreadState() {
 	updates := make([]cache.ChannelReadStateUpdate, 0, len(unreads))
 	for _, u := range unreads {
 		updates = append(updates, cache.ChannelReadStateUpdate{
-			ChannelID:  u.ChannelID,
-			LastReadTS: u.LastRead,
-			HasUnread:  u.HasUnread,
+			ChannelID:    u.ChannelID,
+			LastReadTS:   u.LastRead,
+			HasUnread:    u.HasUnread,
+			MentionCount: u.MentionCount,
 		})
 	}
 	if err := r.db.BatchUpdateChannelReadState(updates); err != nil {

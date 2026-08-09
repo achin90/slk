@@ -138,3 +138,34 @@ func TestOtherUnreadCount_EmptyReaderResult(t *testing.T) {
 		t.Errorf("OtherUnreadCount with empty reader = %d want 0", got)
 	}
 }
+
+func TestOtherMentionCount_NoReader(t *testing.T) {
+	m := New([]WorkspaceItem{{ID: "T1"}}, 0)
+	if got := m.OtherMentionCount("T1"); got != 0 {
+		t.Errorf("OtherMentionCount with no reader = %d want 0", got)
+	}
+}
+
+func TestOtherMentionCount(t *testing.T) {
+	m := New([]WorkspaceItem{
+		{ID: "T1"}, {ID: "T2"}, {ID: "T3"},
+	}, 0)
+	m.SetMentionReader(func() map[string]int {
+		return map[string]int{"T1": 5, "T2": 3, "T3": 0}
+	})
+
+	cases := []struct {
+		activeID string
+		want     int
+	}{
+		{"T1", 3},  // T2:3 + T3:0
+		{"T2", 5},  // T1:5 + T3:0
+		{"T3", 8},  // T1:5 + T2:3
+		{"T-x", 8}, // all counted
+	}
+	for _, tc := range cases {
+		if got := m.OtherMentionCount(tc.activeID); got != tc.want {
+			t.Errorf("OtherMentionCount(%q) = %d want %d", tc.activeID, got, tc.want)
+		}
+	}
+}

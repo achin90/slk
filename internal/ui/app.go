@@ -1998,6 +1998,13 @@ func (a *App) SetWorkspaceUnreadReader(f func() []string) {
 	a.workspaceRail.SetUnreadReader(f)
 }
 
+// SetWorkspaceMentionReader installs the callback the workspace rail
+// uses to get per-workspace mention counts (the "dock badge number")
+// for other-workspace mention totals in the status_command hook.
+func (a *App) SetWorkspaceMentionReader(f func() map[string]int) {
+	a.workspaceRail.SetMentionReader(f)
+}
+
 // SetStatusReporter installs the StatusReportFunc invoked on every unread-state
 // change to mirror slk's unread state onto an external surface (config:
 // notifications.status_command).
@@ -3065,10 +3072,12 @@ func (a *App) notifyReadStateChanged() {
 	a.workspaceRail.RefreshUnreads()
 	active := a.sidebar.UnreadChannelCount()
 	other := a.workspaceRail.OtherUnreadCount(a.activeTeamID)
+	mentions := a.sidebar.MentionCount()
+	otherMentions := a.workspaceRail.OtherMentionCount(a.activeTeamID)
 	name := a.workspaceRail.NameByID(a.activeTeamID)
 	a.windowTitle = computeWindowTitle(a.activeTeamID, name, active, other)
 	if a.statusReport != nil {
-		a.statusReport(active, other, name, a.windowTitle)
+		a.statusReport(active, other, mentions, otherMentions, name, a.windowTitle)
 	}
 }
 
