@@ -361,6 +361,11 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	a.sidebar.SetActiveChannelID(m.ID)
 	a.messagepane.SetChannel(m.Name, "")
 	a.messagepane.SetChannelType(m.Type)
+	// Clear any prior channel's "── new ──" entry boundary on the
+	// window model we're about to repurpose. The fresh boundary is
+	// set below once cached messages are loaded. Done before
+	// SetMessages so the cache rebuild sees the cleared value.
+	a.messagepane.SetEntryBoundaryTS("")
 
 	// Close any open mention picker before switching channels.
 	// SetUsers replaces the user list but does NOT re-run the
@@ -374,6 +379,21 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	// Record the applied selection on the focused window so window
 	// focus changes can retarget to it (see internal/ui/windows.go).
 	a.setFocusedWindowChannel(m.ID, m.Name, m.Type)
+
+	// Snapshot the pre-entry last_read_ts for the channel pane's
+	// "── new ──" landmark. Captured BEFORE any MarkRead/Fetch fires
+	// (those bump the DB last_read_ts to latestTS and WS echoes a
+	// channel_marked that would otherwise erase the line within a
+	// frame of entry). Stored as the model's stable entryBoundaryTS;
+	// cleared on channel switch above. Tests that don't wire
+	// readStateReader get an empty boundary (no landmark), matching
+	// pre-change behavior for channels with no read state.
+	var preEntryLastReadTS string
+	if a.readStateReader != nil {
+		if state, ok := a.readStateReader()[m.ID]; ok {
+			preEntryLastReadTS = state.LastReadTS
+		}
+	}
 
 	cached := a.channels.ReadCache(ids.ChannelID(m.ID))
 	syncedAt := a.channels.SyncedAt(ids.ChannelID(m.ID))
@@ -399,6 +419,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 		// Mark-as-read if non-empty. No fetch.
 		a.messagepane.SetLoading(false)
 		a.messagepane.SetMessages(cached)
+		a.messagepane.SetEntryBoundaryTS(preEntryLastReadTS)
 		a.statusbar.SetSyncing(false)
 		debuglog.Cache("ChannelSelectedMsg: channel=%s tier=1_fresh", m.ID)
 		tier = "1_fresh"
@@ -422,6 +443,7 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 		//     knows it's being checked.
 		a.messagepane.SetLoading(false)
 		a.messagepane.SetMessages(cached)
+		a.messagepane.SetEntryBoundaryTS(preEntryLastReadTS)
 		a.statusbar.SetSyncing(true)
 		debuglog.Cache("ChannelSelectedMsg: channel=%s tier=2_verify", m.ID)
 		tier = "2_verify"
@@ -432,6 +454,10 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 		// never-visited channel). Spinner + fetch.
 		a.messagepane.SetLoading(true)
 		a.messagepane.SetMessages(nil)
+		// preEntryLastReadTS still applies: a channel with a
+		// recorded last_read_ts but no cached messages will show
+		// the landmark once the fetch lands and buildCache runs.
+		a.messagepane.SetEntryBoundaryTS(preEntryLastReadTS)
 		a.statusbar.SetSyncing(false)
 		debuglog.Cache("ChannelSelectedMsg: channel=%s tier=3_spinner", m.ID)
 		tier = "3_spinner"

@@ -327,6 +327,16 @@ type Model struct {
 
 	lastReadTS string
 
+	// entryBoundaryTS is the stable "where unreads started at channel
+	// entry" snapshot captured when the user first opens this channel
+	// in the window. Unlike lastReadTS, it is NOT bumped by subsequent
+	// mark-read echoes (WS channel_marked, local MarkRead), so the
+	// "── new ──" landmark rendered from it stays visible until the
+	// window switches to a different channel. Mirrors the thread
+	// pane's unreadBoundaryTS design (internal/ui/thread/model.go).
+	// Empty string disables the landmark.
+	entryBoundaryTS string
+
 	// version increments on every state change that could alter rendered
 	// View() output. The App layer caches the WRAPPED panel output (border +
 	// exactSize + ReapplyBgAfterResets) keyed on this counter, so on compose
@@ -1515,6 +1525,27 @@ func (m *Model) LastReadTS() string {
 	return m.lastReadTS
 }
 
+// SetEntryBoundaryTS captures the "where unreads started" timestamp at
+// the moment the user enters this channel in this window. The landmark
+// is rendered from this stable snapshot (see buildCache) so it survives
+// the mark-read echoes that bump lastReadTS shortly after entry. Pass
+// the pre-entry last_read_ts from the cache read-state at channel
+// selection; clear with "" when leaving the channel.
+func (m *Model) SetEntryBoundaryTS(ts string) {
+	if m.entryBoundaryTS == ts {
+		return
+	}
+	m.entryBoundaryTS = ts
+	m.cache = nil
+	m.dirty()
+}
+
+// EntryBoundaryTS returns the captured entry-boundary timestamp. Used by
+// tests.
+func (m *Model) EntryBoundaryTS() string {
+	return m.entryBoundaryTS
+}
+
 func (m *Model) OldestTS() string {
 	if len(m.messages) == 0 {
 		return ""
@@ -1813,8 +1844,13 @@ func (m *Model) buildCache(width int) {
 			lastDate = msgDate
 		}
 
-		// New message landmark: insert before the first unread message
-		if m.lastReadTS != "" && !newMsgLandmarkInserted && msg.TS > m.lastReadTS {
+		// New message landmark: insert before the first unread message.
+		// Rendered from entryBoundaryTS (the stable "where unreads
+		// started at entry" snapshot), NOT the live lastReadTS, so the
+		// line survives the mark-read echoes that bump lastReadTS
+		// immediately after channel entry. Cleared when the window
+		// switches channels (see reduceChannelSelected).
+		if m.entryBoundaryTS != "" && !newMsgLandmarkInserted && msg.TS > m.entryBoundaryTS {
 			newStr := "── new ──"
 			label := lipgloss.NewStyle().Background(styles.Background).Foreground(styles.Error).Bold(true).
 				Width(width).Align(lipgloss.Center).

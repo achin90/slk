@@ -170,6 +170,14 @@ type App struct {
 	activeChannelID string
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
 
+	// readStateReader returns the per-channel read-state map; same
+	// callback handed to the sidebar via SetReadStateReader. Retained
+	// on App so reduceChannelSelected can snapshot the pre-entry
+	// last_read_ts for the channel-pane "── new ──" entry boundary
+	// without widening the ChannelService interface. Nil in tests
+	// that don't wire it.
+	readStateReader func() map[string]cache.ReadState
+
 	// windowTitle is the cached terminal-window-title string, recomputed
 	// by notifyReadStateChanged on every read-state mutation and read by
 	// View() into tea.View.WindowTitle. Bubbletea's renderer emits OSC 2
@@ -1988,6 +1996,7 @@ func (a *App) SetThreadService(s ThreadService) {
 // readers) will call at render time to fetch per-channel read state.
 // Must be set before the first render for unread dots to appear.
 func (a *App) SetReadStateReader(f func() map[string]cache.ReadState) {
+	a.readStateReader = f
 	a.sidebar.SetReadStateReader(f)
 }
 

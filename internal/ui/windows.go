@@ -72,6 +72,7 @@ func (a *App) splitWindow(dir wintree.Dir) tea.Cmd {
 		// for the aliasing hazards it covers).
 		m.SetMessages(cloneMessageItems(src.Messages()))
 		m.SetLastReadTS(src.LastReadTS())
+		m.SetEntryBoundaryTS(src.EntryBoundaryTS())
 		m.SetLoading(src.IsLoading())
 	}
 	a.winModels[id] = m
