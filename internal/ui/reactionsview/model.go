@@ -6,6 +6,7 @@ package reactionsview
 
 import (
 	"image/color"
+	"io"
 	"strconv"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/muesli/reflow/truncate"
 
 	slkemoji "github.com/gammons/slk/internal/emoji"
+	imgpkg "github.com/gammons/slk/internal/image"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/overlay"
 	"github.com/gammons/slk/internal/ui/styles"
@@ -33,16 +35,43 @@ type ReactionGroup struct {
 	Count int
 }
 
+// EmojiContext bundles the emoji-image rendering dependencies for the
+// reactions view. Set once at startup; updated again when the
+// CustomEmojisLoadedMsg arrives via SetEmojiCustoms. Mirrors
+// reactionpicker.EmojiContext.
+type EmojiContext struct {
+	PlaceCtx slkemoji.PlaceContext
+	Cells    int               // 1 or 2; 0 falls back to 2
+	Customs  map[string]string // workspace custom emoji map; nil = empty
+}
+
 // Model is the reactions-list overlay state.
 type Model struct {
-	groups  []ReactionGroup
-	visible bool
-	offset  int // scroll offset in rendered content lines
-	maxOff  int // last computed maximum offset (set during render)
+	groups   []ReactionGroup
+	visible  bool
+	offset   int // scroll offset in rendered content lines
+	maxOff   int // last computed maximum offset (set during render)
+	emojiCtx EmojiContext
 }
 
 // New creates an empty, hidden modal.
 func New() *Model { return &Model{} }
+
+// SetEmojiContext configures emoji-image rendering for the reactions
+// view. Mirrors reactionpicker.Model.SetEmojiContext.
+func (m *Model) SetEmojiContext(ctx EmojiContext) {
+	if ctx.Cells != 1 && ctx.Cells != 2 {
+		ctx.Cells = 2
+	}
+	m.emojiCtx = ctx
+}
+
+// SetEmojiCustoms updates the customs map without changing PlaceCtx
+// or Cells. Called from App.SetCustomEmoji when the workspace's
+// custom emoji list arrives.
+func (m *Model) SetEmojiCustoms(customs map[string]string) {
+	m.emojiCtx.Customs = customs
+}
 
 // Open shows the modal for the given reaction groups and resets scroll.
 func (m *Model) Open(groups []ReactionGroup) {
@@ -84,30 +113,64 @@ func (m *Model) HandleKey(keyStr string) {
 	}
 }
 
-// emojiGlyph renders an emoji name as a Unicode glyph when it is a
-// composition-safe single codepoint, falling back to the :shortcode: form
-// (same primitive the reaction picker uses). Workspace custom emoji are not in
-// the built-in CodeMap and fall back to :name: which is the desired behavior.
-func emojiGlyph(name string) string {
-	code := ":" + name + ":"
-	if u, ok := slkemoji.CodeMap()[code]; ok {
-		u = strings.TrimRight(u, " ")
-		if slkemoji.ShouldRenderUnicode(u) {
-			return u
+// emojiKind describes how resolveEmoji rendered an emoji. The header
+// prints the :shortcode: label beside the emoji so ambiguous art is
+// identifiable — except for emojiShortcode, which already *is* the
+// label and would otherwise print twice.
+type emojiKind int
+
+const (
+	emojiImage     emojiKind = iota // kitty image placement
+	emojiGlyph                      // Unicode character
+	emojiShortcode                  // ":name:" literal text
+)
+
+// resolveEmoji renders an emoji name as either a kitty image placement
+// (when image mode is active and the URL resolves) or the legacy
+// Unicode/shortcode fallback. The flush callback is non-nil only on the
+// image path's cold path.
+func (m *Model) resolveEmoji(name string) (string, func(io.Writer) error, emojiKind) {
+	imageOK := slkemoji.ImageModeActive() && m.emojiCtx.PlaceCtx.Fetcher != nil
+	if imageOK {
+		if url, ok := slkemoji.URLForShortcode(name, m.emojiCtx.Customs); ok {
+			cells := m.emojiCtx.Cells
+			if cells <= 0 {
+				cells = 2
+			}
+			if placement, flush, ok := slkemoji.Place(m.emojiCtx.PlaceCtx, url, cells); ok {
+				return placement, flush, emojiImage
+			}
 		}
 	}
-	return code
+	// Legacy fallback: strip skin tone for glyph rendering, then try
+	// Unicode, then fall back to :shortcode: text.
+	legacyName := slkemoji.StripSkinTone(name)
+	resolved := slkemoji.Sprint(":" + legacyName + ":")
+	if slkemoji.ShouldRenderUnicode(resolved) {
+		return resolved, nil, emojiGlyph
+	}
+	return ":" + legacyName + ":", nil, emojiShortcode
 }
 
 // contentLines builds the full (unwindowed) list of rendered content lines:
 // an emoji header per group followed by one indented line per user.
-func (m *Model) contentLines(bg color.Color, innerWidth int) []string {
+// Flush callbacks for kitty image uploads are collected and fired by
+// renderBox after the visible window is determined.
+func (m *Model) contentLines(bg color.Color, innerWidth int, flushes *[]func(io.Writer) error) []string {
 	headerStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.Primary).Bold(true)
 	userStyle := lipgloss.NewStyle().Background(bg).Foreground(styles.TextPrimary)
 
 	var lines []string
 	for _, g := range m.groups {
-		header := emojiGlyph(g.Emoji) + "  (" + countLabel(len(g.Users), g.Count) + ")"
+		emojiStr, flush, kind := m.resolveEmoji(g.Emoji)
+		if flush != nil {
+			*flushes = append(*flushes, flush)
+		}
+		header := emojiStr
+		if kind != emojiShortcode {
+			header += "  :" + g.Emoji + ":"
+		}
+		header += "  (" + countLabel(len(g.Users), g.Count) + ")"
 		lines = append(lines, headerStyle.Width(innerWidth).Render(fit(header, innerWidth)))
 		for _, u := range g.Users {
 			lines = append(lines, userStyle.Width(innerWidth).Render(fit("  "+u, innerWidth)))
@@ -181,7 +244,8 @@ func (m *Model) renderBox(termWidth, termHeight int) string {
 		Foreground(styles.Primary).
 		Render("Reactions")
 
-	all := m.contentLines(bg, innerWidth)
+	var pendingFlushes []func(io.Writer) error
+	all := m.contentLines(bg, innerWidth, &pendingFlushes)
 
 	// Visible window: leave headroom for title, blank, footer (~6 lines).
 	maxVisible := termHeight - 8
@@ -216,6 +280,15 @@ func (m *Model) renderBox(termWidth, termHeight int) string {
 	// Re-paint modal bg+fg after every ANSI reset so trailing/unstyled cells
 	// don't leak the dimmed app behind the overlay (same as help/picker).
 	content = messages.ReapplyBgAfterResets(content, messages.BgANSI()+messages.FgANSI())
+
+	// Fire any kitty image upload callbacks the Place calls produced.
+	// Most are no-ops (the messages pane already triggered the upload
+	// via the shared Registry); the reactions view still owns the fire
+	// to handle the case where it's the first/only surface to reference
+	// a given emoji this session. Same pattern as the reaction picker.
+	for _, fl := range pendingFlushes {
+		_ = fl(imgpkg.KittyOutput)
+	}
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

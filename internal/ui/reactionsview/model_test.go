@@ -127,6 +127,25 @@ func TestViewOverlayEdgeCasesDoNotPanic(t *testing.T) {
 	_ = m.ViewOverlay(2, 24, strings.Repeat("\n", 24))
 }
 
+// The shortcode label is what makes an unfamiliar emoji identifiable,
+// so it renders beside the emoji — but not when the emoji already fell
+// back to :shortcode: text, which would print the name twice.
+func TestViewOverlayRendersShortcodeLabel(t *testing.T) {
+	m := New()
+	m.Open([]ReactionGroup{
+		{Emoji: "thumbsup", Users: []string{"Alice"}, Count: 1},
+		{Emoji: "definitely-not-a-real-emoji", Users: []string{"Bob"}, Count: 1},
+	})
+	out := m.ViewOverlay(80, 24, strings.Repeat("\n", 24))
+
+	if !strings.Contains(out, ":thumbsup:") {
+		t.Errorf("glyph emoji should be labeled with its shortcode, got:\n%s", out)
+	}
+	if strings.Count(out, ":definitely-not-a-real-emoji:") != 1 {
+		t.Errorf("unresolvable emoji renders as its own shortcode and must not be labeled twice, got:\n%s", out)
+	}
+}
+
 func TestViewOverlayRendersNamesAndCounts(t *testing.T) {
 	m := New()
 	out := m.ViewOverlay(80, 24, "background")

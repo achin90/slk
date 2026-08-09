@@ -2025,6 +2025,11 @@ func (a *App) SetEmojiContext(ctx messages.EmojiContext) {
 		Cells:    ctx.Cells,
 		Customs:  ctx.Customs,
 	})
+	a.reactionsView.SetEmojiContext(reactionsview.EmojiContext{
+		PlaceCtx: ctx.PlaceCtx,
+		Cells:    ctx.Cells,
+		Customs:  ctx.Customs,
+	})
 	a.compose.SetEmojiContext(emojipicker.EmojiContext{
 		PlaceCtx: ctx.PlaceCtx,
 		Cells:    ctx.Cells,
@@ -2390,6 +2395,7 @@ func (a *App) SetCustomEmoji(customs map[string]string) {
 	}
 	a.threadPanel.SetEmojiCustoms(customs)
 	a.reactionPicker.SetEmojiCustoms(customs)
+	a.reactionsView.SetEmojiCustoms(customs)
 	// Compose autocomplete dropdowns (main + thread) also need the
 	// customs map for View()-time URL resolution; without this, custom
 	// emoji rows fall back to the placeholder glyph. See
