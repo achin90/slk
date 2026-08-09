@@ -1248,11 +1248,13 @@ func (m *Model) buildCache(width int) {
 	cursorStyle := lipgloss.NewStyle().Foreground(styles.SelectionBorderColor(m.focused))
 	activeBorderStyle := lipgloss.NewStyle().Foreground(styles.Warning)
 	dotStyle := lipgloss.NewStyle().Foreground(styles.Primary)
+	mentionDotStyle := lipgloss.NewStyle().Foreground(styles.Error)
 	privateStyle := lipgloss.NewStyle().Foreground(styles.Warning)
 
 	cursorSelected := cursorStyle.Render("▌")
 	activeBorder := activeBorderStyle.Render("▌")
 	unreadDotStr := dotStyle.Render("●")
+	mentionDotStr := mentionDotStyle.Render("●")
 	privatePrefix := privateStyle.Render("◆ ")
 	// Read private channels use a *plain* "◆ " glyph (no inline ANSI
 	// styling) so the prefix inherits the surrounding row style the
@@ -1358,9 +1360,17 @@ func (m *Model) buildCache(width int) {
 		hasUnread := item.IsVisiblyUnread(readState[item.ID])
 
 		// Unread dot indicator (same regardless of selection state).
+		// Channels with mentions use a distinct (error-red) dot so the
+		// user can pick out "@you" channels from plain unread channels
+		// at a glance. MentionCount comes from the read-state DB, the
+		// same source as HasUnread.
 		unreadDot := " "
 		if hasUnread {
-			unreadDot = unreadDotStr
+			if readState[item.ID].MentionCount > 0 {
+				unreadDot = mentionDotStr
+			} else {
+				unreadDot = unreadDotStr
+			}
 		}
 
 		var prefix string
