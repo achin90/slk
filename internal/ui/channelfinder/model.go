@@ -37,6 +37,7 @@ type Item struct {
 	Name     string
 	Type     string // channel, dm, group_dm, private, threads
 	Presence string // for DMs: active, away
+	DMUserID string // for DMs: the user ID of the other party
 	Joined   bool   // true if the user is already a member; false for browseable public channels
 	// LastVisited is the unix timestamp (seconds) of the user's most
 	// recent visit to this channel; 0 means never visited. Drives the
@@ -73,6 +74,26 @@ func New() Model {
 func (m *Model) SetItems(items []Item) {
 	synth := m.extractSynthetic()
 	m.items = append(synth, items...)
+}
+
+// UpdatePresenceByUser updates the Presence field on any DM item whose
+// DMUserID matches, applying live presence_change events without a full
+// SetItems rebuild. Re-runs filter() if the finder is visible so the
+// dot color updates immediately.
+func (m *Model) UpdatePresenceByUser(userID, presence string) {
+	if userID == "" {
+		return
+	}
+	changed := false
+	for i := range m.items {
+		if m.items[i].DMUserID == userID && m.items[i].Presence != presence {
+			m.items[i].Presence = presence
+			changed = true
+		}
+	}
+	if changed && m.visible {
+		m.filter()
+	}
 }
 
 // SetSyntheticItems replaces the set of non-channel destinations the finder

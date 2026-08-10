@@ -162,6 +162,7 @@ func (p *presenceController) Handle(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	case PresenceChangeMsg:
 		// Per-user presence dot in the DM list; not workspace-scoped.
 		a.sidebar.UpdatePresenceByUser(m.UserID, m.Presence)
+		a.channelFinder.UpdatePresenceByUser(m.UserID, m.Presence)
 		return nil, true
 
 	case StatusChangeMsg:
