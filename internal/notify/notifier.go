@@ -60,6 +60,7 @@ type NotifyContext struct {
 	OnKeyword       []string
 	IsDND           bool // when true, ShouldNotify always returns false
 	IsMuted         bool // when true (conversation is muted), ShouldNotify always returns false
+	SelfSubteams    map[string]struct{} // usergroup IDs the current user belongs to; gates <!subteam^S…> mention detection
 }
 
 // ShouldNotify returns true if a message should trigger a desktop notification.
@@ -94,7 +95,8 @@ func ShouldNotify(ctx NotifyContext, channelID, userID, text, channelType string
 	if ctx.OnMention && (strings.Contains(text, "<@"+ctx.CurrentUserID+">") ||
 		strings.Contains(text, "<!here>") ||
 		strings.Contains(text, "<!channel>") ||
-		strings.Contains(text, "<!everyone>")) {
+		strings.Contains(text, "<!everyone>") ||
+		subteamMentionsSelf(text, ctx.SelfSubteams)) {
 		return true
 	}
 
@@ -127,6 +129,22 @@ var (
 	linkWithLabelRe = regexp.MustCompile(`<((?:https?://|mailto:)[^|>]+)\|([^>]+)>`)
 	linkBareRe      = regexp.MustCompile(`<((?:https?://|mailto:)[^>]+)>`)
 )
+
+// subteamMentionsSelf reports whether text contains a <!subteam^SID>
+// mention whose ID is in selfSubteams (i.e. targets the current user).
+// Returns false when selfSubteams is nil/empty.
+func subteamMentionsSelf(text string, selfSubteams map[string]struct{}) bool {
+	if len(selfSubteams) == 0 {
+		return false
+	}
+	matches := subteamMentionRe.FindAllStringSubmatch(text, -1)
+	for _, m := range matches {
+		if _, ok := selfSubteams[m[1]]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 // StripSlackMarkup converts Slack-formatted text to plain text suitable for
 // OS notification bodies. User mentions are resolved against userNames; if

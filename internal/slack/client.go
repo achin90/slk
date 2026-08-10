@@ -818,9 +818,14 @@ func (c *Client) GetHistorySince(ctx context.Context, channelID, oldest string, 
 }
 
 // GetUserGroups retrieves the workspace's usergroups (the @team
-// handles behind <!subteam^S…> mentions) via usergroups.list.
+// handles behind <!subteam^S…> mentions) via usergroups.list. The
+// include_users option is set so each group's Users slice is populated;
+// the caller derives the current user's subteam memberships from it (a
+// <!subteam^S…> mention only targets a user who is a member of that
+// usergroup, which is needed to count team mentions toward the dock
+// badge / sidebar mention dot).
 func (c *Client) GetUserGroups(ctx context.Context) ([]slack.UserGroup, error) {
-	groups, err := c.api.GetUserGroupsContext(ctx)
+	groups, err := c.api.GetUserGroupsContext(ctx, slack.GetUserGroupsOptionIncludeUsers(true))
 	if err != nil {
 		return nil, fmt.Errorf("getting usergroups: %w", err)
 	}

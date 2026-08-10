@@ -202,6 +202,15 @@ type WorkspaceContext struct {
 	// The stored map is published once and never mutated afterwards, so
 	// readers need no further synchronization.
 	userGroups atomic.Pointer[map[string]string]
+	// selfSubteams holds the set of usergroup IDs the current user is a
+	// member of (derived from usergroups.list with include_users=true).
+	// A <!subteam^S…> mention only targets members of that usergroup, so
+	// ShouldNotify consults this set to decide whether a team mention
+	// counts toward the dock badge / sidebar mention dot. Same
+	// publish-once/immutable-map discipline as userGroups: written once
+	// by the background fetch goroutine, read cross-goroutine by the RTM
+	// event loop.
+	selfSubteams atomic.Pointer[map[string]struct{}]
 	// Self presence and DND state for this workspace. Populated on connect
 	// and updated by manual_presence_change / dnd_updated WS events plus
 	// optimistic writes from the presence menu.
@@ -244,6 +253,22 @@ func (w *WorkspaceContext) UserGroups() map[string]string {
 // workspace. The caller must not mutate the map afterwards.
 func (w *WorkspaceContext) SetUserGroups(groups map[string]string) {
 	w.userGroups.Store(&groups)
+}
+
+// SelfSubteams returns the set of usergroup IDs the current user is a
+// member of, or an empty set before usergroups.list has returned. Safe
+// to call from any goroutine; the result must be treated as read-only.
+func (w *WorkspaceContext) SelfSubteams() map[string]struct{} {
+	if m := w.selfSubteams.Load(); m != nil {
+		return *m
+	}
+	return map[string]struct{}{}
+}
+
+// SetSelfSubteams publishes the set of usergroup IDs the current user
+// belongs to. The caller must not mutate the map afterwards.
+func (w *WorkspaceContext) SetSelfSubteams(groups map[string]struct{}) {
+	w.selfSubteams.Store(&groups)
 }
 
 // workspaceRouter holds the program-wide "active workspace" pointer.
@@ -2171,6 +2196,13 @@ func run() error {
 			// send a follow-up so render caches and compose pickers can
 			// refresh for the active workspace. Best-effort: failure leaves
 			// bare subteam mentions rendered as "@group".
+			//
+			// GetUserGroups passes include_users=true so each group's
+			// Users slice is populated; from that we derive the set of
+			// subteam IDs the current user belongs to. ShouldNotify
+			// consults that set to decide whether a <!subteam^S…>
+			// mention targets the user (and thus counts toward the dock
+			// badge / sidebar mention dot).
 			go func(teamID string) {
 				groups, err := wctx.Client.GetUserGroups(ctx)
 				if err != nil {
@@ -2179,6 +2211,7 @@ func run() error {
 				}
 				byID := usergroupHandles(groups)
 				wctx.SetUserGroups(byID)
+				wctx.SetSelfSubteams(selfSubteamIDs(groups, wctx.UserID))
 				p.Send(ui.UserGroupsLoadedMsg{
 					TeamID:     teamID,
 					UserGroups: byID,
@@ -2258,6 +2291,28 @@ func usergroupHandles(groups []slack.UserGroup) map[string]string {
 		}
 	}
 	return byID
+}
+
+// selfSubteamIDs returns the set of usergroup IDs whose Users membership
+// list contains userID. A <!subteam^S…> mention only targets members of
+// that usergroup, so this set is what ShouldNotify checks to decide
+// whether a team mention counts toward the dock badge / sidebar mention
+// dot. usergroups.list is called with include_users=true so each group's
+// Users slice is populated.
+func selfSubteamIDs(groups []slack.UserGroup, userID string) map[string]struct{} {
+	set := make(map[string]struct{}, len(groups))
+	if userID == "" {
+		return set
+	}
+	for _, g := range groups {
+		for _, uid := range g.Users {
+			if uid == userID {
+				set[g.ID] = struct{}{}
+				break
+			}
+		}
+	}
+	return set
 }
 
 // slugifyHandle turns a usergroup display name into a mention-safe
@@ -4033,6 +4088,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			OnKeyword:       h.notifyCfg.OnKeyword,
 			IsDND:           h.wsCtx != nil && h.wsCtx.DNDEnabled && (h.wsCtx.DNDEndTS.IsZero() || time.Now().Before(h.wsCtx.DNDEndTS)),
 			IsMuted:         h.wsCtx != nil && h.wsCtx.MuteStore != nil && h.wsCtx.MuteStore.IsMuted(channelID),
+			SelfSubteams:    h.wsCtx.SelfSubteams(),
 		}
 		chType := h.channelTypes[channelID]
 		// Pass the raw userID (not authorID): ShouldNotify's self-message
@@ -4090,13 +4146,14 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	}
 
 	// Mention count: increment when the incoming message is a DM,
-	// @mention, @here/@channel/@everyone, or keyword hit — the things
-	// that drive Slack's dock badge number. This runs independently of
-	// notification settings (on_mention/on_dm/on_keyword control OS
-	// notifications, not the badge count) and DND (mentions accumulate
-	// during DND, they just don't notify). Muted channels and
-	// self-messages are excluded. Reuses ShouldNotify with all triggers
-	// enabled and DND suppressed.
+	// @mention, @here/@channel/@everyone, a subteam mention targeting
+	// the current user, or keyword hit — the things that drive Slack's
+	// dock badge number. This runs independently of notification
+	// settings (on_mention/on_dm/on_keyword control OS notifications,
+	// not the badge count) and DND (mentions accumulate during DND,
+	// they just don't notify). Muted channels and self-messages are
+	// excluded. Reuses ShouldNotify with all triggers enabled and DND
+	// suppressed.
 	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
 		mentionCtx := notify.NotifyContext{
 			CurrentUserID:   h.currentUserID,
@@ -4107,6 +4164,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 			OnKeyword:       h.notifyCfg.OnKeyword,
 			IsDND:           false,
 			IsMuted:         h.wsCtx != nil && h.wsCtx.MuteStore != nil && h.wsCtx.MuteStore.IsMuted(channelID),
+			SelfSubteams:    h.wsCtx.SelfSubteams(),
 		}
 		chType := h.channelTypes[channelID]
 		if notify.ShouldNotify(mentionCtx, channelID, userID, text, chType) {

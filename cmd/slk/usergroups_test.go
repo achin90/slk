@@ -84,3 +84,78 @@ func TestWorkspaceContextUserGroupsConcurrentAccess(t *testing.T) {
 		t.Errorf("UserGroups()[S1] = %q, want platform-team", got)
 	}
 }
+
+func TestSelfSubteamIDs(t *testing.T) {
+	groups := []slack.UserGroup{
+		{ID: "S0ENG", Handle: "eng", Users: []string{"U1", "U2"}},
+		{ID: "S0QA", Handle: "qa", Users: []string{"U3"}},
+		{ID: "S0PLATFORM", Handle: "platform", Users: []string{"U2", "U1"}},
+	}
+	set := selfSubteamIDs(groups, "U1")
+	if _, ok := set["S0ENG"]; !ok {
+		t.Errorf("selfSubteamIDs missing S0ENG; got %v", set)
+	}
+	if _, ok := set["S0PLATFORM"]; !ok {
+		t.Errorf("selfSubteamIDs missing S0PLATFORM; got %v", set)
+	}
+	if _, ok := set["S0QA"]; ok {
+		t.Errorf("selfSubteamIDs should not include S0QA (U1 not a member); got %v", set)
+	}
+}
+
+func TestSelfSubteamIDs_EmptyUserID(t *testing.T) {
+	groups := []slack.UserGroup{{ID: "S0ENG", Users: []string{"U1"}}}
+	set := selfSubteamIDs(groups, "")
+	if len(set) != 0 {
+		t.Errorf("selfSubteamIDs with empty userID = %v, want empty", set)
+	}
+}
+
+func TestSelfSubteamIDs_NoMembership(t *testing.T) {
+	groups := []slack.UserGroup{{ID: "S0ENG", Users: []string{"U2"}}}
+	set := selfSubteamIDs(groups, "U1")
+	if len(set) != 0 {
+		t.Errorf("selfSubteamIDs with no matching membership = %v, want empty", set)
+	}
+}
+
+func TestWorkspaceContextSelfSubteamsDefaultsEmpty(t *testing.T) {
+	var wctx WorkspaceContext
+	if got := wctx.SelfSubteams(); got == nil || len(got) != 0 {
+		t.Errorf("SelfSubteams() before load = %v, want empty non-nil map", got)
+	}
+}
+
+func TestWorkspaceContextSelfSubteamsRoundTrip(t *testing.T) {
+	wctx := &WorkspaceContext{}
+	set := map[string]struct{}{"S0ENG": {}}
+	wctx.SetSelfSubteams(set)
+	if _, ok := wctx.SelfSubteams()["S0ENG"]; !ok {
+		t.Errorf("SelfSubteams() after SetSelfSubteams = %v, want S0ENG present", wctx.SelfSubteams())
+	}
+}
+
+// The selfSubteams map is published from the background usergroups.list
+// fetch goroutine while the RTM event loop reads it. Run under -race to
+// catch a regression back to a plain map field.
+func TestWorkspaceContextSelfSubteamsConcurrentAccess(t *testing.T) {
+	wctx := &WorkspaceContext{}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			wctx.SetSelfSubteams(map[string]struct{}{"S1": {}})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_ = wctx.SelfSubteams()["S1"]
+		}
+	}()
+	wg.Wait()
+	if _, ok := wctx.SelfSubteams()["S1"]; !ok {
+		t.Errorf("SelfSubteams()[S1] missing after concurrent writes; got %v", wctx.SelfSubteams())
+	}
+}

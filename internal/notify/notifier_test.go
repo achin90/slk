@@ -169,6 +169,84 @@ func TestShouldNotify_SuppressedByMute(t *testing.T) {
 	}
 }
 
+func TestShouldNotify_SubteamMention(t *testing.T) {
+	self := map[string]struct{}{"S0ENG": {}}
+	ctx := NotifyContext{
+		CurrentUserID:   "U1",
+		ActiveChannelID: "C_OTHER",
+		IsActiveWS:      true,
+		OnMention:       true,
+		SelfSubteams:    self,
+	}
+	if !ShouldNotify(ctx, "C1", "U2", "hey <!subteam^S0ENG> please review", "channel") {
+		t.Error("should notify for subteam mention the user is a member of")
+	}
+	// Labeled form (<!subteam^SID|@label>) must also be detected.
+	if !ShouldNotify(ctx, "C1", "U2", "ping <!subteam^S0ENG|@eng> look", "channel") {
+		t.Error("should notify for labeled subteam mention the user is a member of")
+	}
+	// A subteam the user is NOT a member of must not count as a mention.
+	if ShouldNotify(ctx, "C1", "U2", "hey <!subteam^S0OTHER> please review", "channel") {
+		t.Error("should not notify for subteam mention the user is not a member of")
+	}
+}
+
+func TestShouldNotify_SubteamMention_NoMembership(t *testing.T) {
+	// Before usergroups.list returns (or the user is in no subteams),
+	// SelfSubteams is nil/empty: a subteam mention must NOT count as a
+	// personal mention, since we don't yet know if the user is targeted.
+	ctx := NotifyContext{
+		CurrentUserID:   "U1",
+		ActiveChannelID: "C_OTHER",
+		IsActiveWS:      true,
+		OnMention:       true,
+	}
+	if ShouldNotify(ctx, "C1", "U2", "hey <!subteam^S0ENG> please review", "channel") {
+		t.Error("should not notify for subteam mention when membership is unknown")
+	}
+}
+
+func TestShouldNotify_SubteamMention_Disabled(t *testing.T) {
+	// OnMention=false suppresses subteam mentions just like @here/@channel.
+	ctx := NotifyContext{
+		CurrentUserID:   "U1",
+		ActiveChannelID: "C_OTHER",
+		IsActiveWS:      true,
+		OnMention:       false,
+		SelfSubteams:    map[string]struct{}{"S0ENG": {}},
+	}
+	if ShouldNotify(ctx, "C1", "U2", "hey <!subteam^S0ENG> please review", "channel") {
+		t.Error("should not notify for subteam mention when OnMention is false")
+	}
+}
+
+func TestSubteamMentionsSelf(t *testing.T) {
+	self := map[string]struct{}{"S0ENG": {}, "S0QA": {}}
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"hey <!subteam^S0ENG> please", true},
+		{"ping <!subteam^S0ENG|@eng> look", true},
+		{"two <!subteam^S0QA> and <!subteam^S0ENG>", true},
+		{"hey <!subteam^S0OTHER> please", false},
+		{"no mention here", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := subteamMentionsSelf(c.text, self); got != c.want {
+			t.Errorf("subteamMentionsSelf(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+	// nil/empty set never matches.
+	if subteamMentionsSelf("hey <!subteam^S0ENG>", nil) {
+		t.Error("subteamMentionsSelf with nil set should be false")
+	}
+	if subteamMentionsSelf("hey <!subteam^S0ENG>", map[string]struct{}{}) {
+		t.Error("subteamMentionsSelf with empty set should be false")
+	}
+}
+
 func TestStripSlackMarkup(t *testing.T) {
 	userNames := map[string]string{
 		"U123": "Alice",
