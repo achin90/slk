@@ -7,6 +7,7 @@ import (
 	"image"
 	"log"
 	"mime"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2982,7 +2983,34 @@ func (a *App) smartPaste() tea.Cmd {
 // For keystroke smart-paste this is the OS clipboard's text; for
 // bracketed-paste this is the PasteMsg's payload.
 func (a *App) tryAttachFromClipboard(target *compose.Model, pathCandidate string) (bool, tea.Cmd) {
-	// 1. Image bytes from the OS clipboard.
+	if consumed, cmd := a.tryAttachClipboardImage(target); consumed {
+		return consumed, cmd
+	}
+	return a.tryAttachPath(target, pathCandidate)
+}
+
+// tryAttachDroppedPath is the bracketed-paste ordering: the pasted text
+// is tested as a file path FIRST, and only then does the OS clipboard
+// get inspected for image bytes.
+//
+// The order matters because a bracketed paste carries its own payload.
+// When the user drags a file onto the terminal, the dropped path is
+// the explicit request; any image sitting in the clipboard is ambient
+// leftover state (and for this app it usually IS populated, since
+// screenshot-paste is the common workflow). Checking the image first
+// would attach a stale screenshot instead of the file just dropped.
+func (a *App) tryAttachDroppedPath(target *compose.Model, pathCandidate string) (bool, tea.Cmd) {
+	if consumed, cmd := a.tryAttachPath(target, pathCandidate); consumed {
+		return consumed, cmd
+	}
+	return a.tryAttachClipboardImage(target)
+}
+
+// tryAttachClipboardImage attaches image bytes from the OS clipboard,
+// if any are present. Terminals can't deliver image bytes via
+// bracketed paste — only a text representation — so the data is read
+// from the clipboard directly.
+func (a *App) tryAttachClipboardImage(target *compose.Model) (bool, tea.Cmd) {
 	if imgBytes := a.clipboardRead(clipboard.FmtImage); len(imgBytes) > 0 {
 		if int64(len(imgBytes)) > maxAttachmentSize {
 			return true, a.uploadToastCmd(
@@ -3002,8 +3030,12 @@ func (a *App) tryAttachFromClipboard(target *compose.Model, pathCandidate string
 			2*time.Second,
 		)
 	}
+	return false, nil
+}
 
-	// 2. File-path text.
+// tryAttachPath attaches the file named by pathCandidate, if that text
+// resolves to an existing regular file within the size limit.
+func (a *App) tryAttachPath(target *compose.Model, pathCandidate string) (bool, tea.Cmd) {
 	if path, ok := resolveFilePath(pathCandidate); ok {
 		info, err := os.Stat(path)
 		if err == nil && info.Mode().IsRegular() {
@@ -3325,11 +3357,52 @@ func humanSize(size int64) string {
 // non-absolute and non-./-relative paths, or paths that don't
 // expand. The caller is responsible for the os.Stat / IsRegular
 // check and the size check.
+//
+// The input is normalized first, because the OS hands us paths in
+// several transport encodings and none of them are the bare path:
+//
+//	'/Users/a/My File.mp4'    macOS Finder "Copy as Pathname" (quotes
+//	                          appear whenever the path has a space)
+//	"/Users/a/My File.mp4"    same, double-quoted variants
+//	/Users/a/My\ File.mp4     terminal drag-and-drop (shell-escaped)
+//	file:///Users/a/My%20File.mp4   some file managers / browsers
+//
+// Without normalization every one of these fails filepath.IsAbs (or
+// the later os.Stat) and the raw text lands in the message box.
 func resolveFilePath(text string) (string, bool) {
 	s := strings.TrimSpace(text)
 	if s == "" || strings.ContainsAny(s, "\n\r") || len(s) > 4096 {
 		return "", false
 	}
+
+	// Strip one layer of matching surrounding quotes. Whether the
+	// path was quoted determines how backslashes are read below:
+	// inside quotes a backslash is a literal character, outside it's
+	// an escape.
+	quoted := false
+	if len(s) >= 2 {
+		if q := s[0]; (q == '\'' || q == '"') && s[len(s)-1] == q {
+			s = s[1 : len(s)-1]
+			quoted = true
+		}
+	}
+
+	switch {
+	case strings.HasPrefix(s, "file://"):
+		u, err := url.Parse(s)
+		if err != nil || u.Path == "" {
+			return "", false
+		}
+		// Reject file://host/path pointing at another machine;
+		// empty and "localhost" both mean the local filesystem.
+		if u.Host != "" && u.Host != "localhost" {
+			return "", false
+		}
+		s = u.Path // already percent-decoded by url.Parse
+	case !quoted:
+		s = unescapeShellPath(s)
+	}
+
 	if strings.HasPrefix(s, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -3341,6 +3414,37 @@ func resolveFilePath(text string) (string, bool) {
 		return "", false
 	}
 	return filepath.Clean(s), true
+}
+
+// unescapeShellPath removes backslash escapes from an unquoted path,
+// the form produced by dragging a file onto a terminal window
+// (`/Users/a/My\ File.mp4`). A backslash is dropped only when it
+// precedes a non-alphanumeric character, so escape sequences that
+// would be meaningful in a shell word are undone while a literal
+// backslash in a filename (legal on macOS, rare) survives unless it
+// happens to sit in front of punctuation. A trailing lone backslash
+// is kept as-is.
+func unescapeShellPath(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			next := s[i+1]
+			isAlnum := (next >= 'a' && next <= 'z') ||
+				(next >= 'A' && next <= 'Z') ||
+				(next >= '0' && next <= '9')
+			if !isAlnum {
+				b.WriteByte(next)
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // uploadToastCmd builds a tea.Cmd that sets the status bar to the

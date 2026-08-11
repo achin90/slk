@@ -4414,3 +4414,86 @@ func TestListReactionsNoOpWhenNoReactions(t *testing.T) {
 		t.Fatal("mode should not change when there are no reactions")
 	}
 }
+
+// resolveFilePath must cope with the transport encodings macOS and
+// terminal emulators wrap paths in. Regression test for pasting a
+// Finder "Copy as Pathname" of a file whose name contains spaces:
+// the clipboard text is single-quoted, which previously failed
+// filepath.IsAbs and dumped the raw path into the message box.
+func TestResolveFilePath_TransportEncodings(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	tests := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{"bare", "/Users/a/f.mp4", "/Users/a/f.mp4", true},
+		{"single quoted with spaces", "'/Users/a/My File.mp4'", "/Users/a/My File.mp4", true},
+		{"double quoted with spaces", `"/Users/a/My File.mp4"`, "/Users/a/My File.mp4", true},
+		{"drag escaped spaces", `/Users/a/My\ File.mp4`, "/Users/a/My File.mp4", true},
+		{"drag escaped punctuation", `/Users/a/f\(1\).mp4`, "/Users/a/f(1).mp4", true},
+		{"file url", "file:///Users/a/My%20File.mp4", "/Users/a/My File.mp4", true},
+		{"file url localhost", "file://localhost/Users/a/f.mp4", "/Users/a/f.mp4", true},
+		{"quoted tilde", "'~/Desktop/My File.mp4'", filepath.Join(home, "Desktop/My File.mp4"), true},
+		{"surrounding whitespace", "  /Users/a/f.mp4  ", "/Users/a/f.mp4", true},
+		{"backslash before alnum kept", `/Users/a/f\x.mp4`, `/Users/a/f\x.mp4`, true},
+		{"remote file url rejected", "file://otherhost/Users/a/f.mp4", "", false},
+		{"relative rejected", "not/a/path.mp4", "", false},
+		{"plain text rejected", "hello world", "", false},
+		{"multiline rejected", "/Users/a/f.mp4\n/Users/a/g.mp4", "", false},
+		{"empty rejected", "   ", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveFilePath(tc.in)
+			if ok != tc.ok {
+				t.Fatalf("resolveFilePath(%q) ok = %v, want %v (got %q)", tc.in, ok, tc.ok, got)
+			}
+			if ok && got != tc.want {
+				t.Errorf("resolveFilePath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// A dragged file arrives as a bracketed paste of its shell-escaped
+// path. That explicit payload must win over whatever image happens to
+// be sitting in the OS clipboard — screenshot-paste is the common
+// workflow here, so the clipboard usually DOES hold a stale image.
+func TestPasteMsg_DroppedPathBeatsStaleClipboardImage(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "My Video 6.53.07 PM.mp4")
+	if err := os.WriteFile(path, []byte("mp4 bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.SetClipboardAvailable(true)
+	app.activeChannelID = "C1"
+	app.focusedPanel = PanelMessages
+	app.SetMode(ModeInsert)
+	// Stale screenshot sitting in the clipboard, as after any Cmd+Shift+4.
+	app.SetClipboardReader(fakeClipboard([]byte("stale png bytes"), nil))
+
+	// Ghostty delivers the drop shell-escaped inside paste markers.
+	escaped := strings.ReplaceAll(path, " ", `\ `)
+	app.Update(tea.PasteMsg{Content: escaped})
+
+	atts := app.compose.Attachments()
+	if len(atts) != 1 {
+		t.Fatalf("expected 1 attachment from dropped path, got %d", len(atts))
+	}
+	if atts[0].Path != path {
+		t.Errorf("attached %q (bytes=%d), want dropped path %q",
+			atts[0].Path, len(atts[0].Bytes), path)
+	}
+	if len(atts[0].Bytes) != 0 {
+		t.Errorf("attached the stale clipboard image instead of the dropped file")
+	}
+	if got := app.compose.Value(); got != "" {
+		t.Errorf("path text leaked into compose: %q", got)
+	}
+}

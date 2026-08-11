@@ -269,13 +269,15 @@ var reduceIO reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 // does three things: insert-mode gate, clipboard-image
 // hit-test, and compose-textarea forward.
 func reducePaste(a *App, m tea.PasteMsg) tea.Cmd {
-	// Bracketed-paste from the terminal. First check the OS
-	// clipboard for an image (terminals can't deliver image bytes
-	// via bracketed paste -- only the text representation -- so
-	// the image data is still sitting in the clipboard waiting
-	// for us to read directly). Also test the bracketed text as a
-	// file path. If neither matches, fall through to forwarding
-	// the paste verbatim into the active compose's textarea.
+	// Bracketed-paste from the terminal. Test the pasted text as a
+	// file path first -- a drag-and-drop of a file arrives here as a
+	// bracketed paste of its (shell-escaped) path, and that explicit
+	// payload should outrank whatever image happens to be sitting in
+	// the OS clipboard. Failing that, check the clipboard for image
+	// bytes (terminals can't deliver those via bracketed paste --
+	// only a text representation -- so the data is still in the
+	// clipboard waiting to be read directly). If neither matches,
+	// forward the paste verbatim into the active compose's textarea.
 	if a.mode == ModeSearch {
 		// Paste into the `/` prompt: the prompt is single-line, so
 		// flatten any newlines to spaces and append.
@@ -292,7 +294,7 @@ func reducePaste(a *App, m tea.PasteMsg) tea.Cmd {
 		if a.focusedPanel == PanelThread && a.threadVisible {
 			target = &a.threadCompose
 		}
-		if consumed, cmd := a.tryAttachFromClipboard(target, m.Content); consumed {
+		if consumed, cmd := a.tryAttachDroppedPath(target, m.Content); consumed {
 			return cmd
 		}
 	}
