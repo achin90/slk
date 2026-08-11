@@ -135,8 +135,13 @@ func (a *App) focusWindow(id wintree.LeafID) tea.Cmd {
 	if a.threadVisible {
 		a.CloseThread() // spec §7: thread follows focused window
 	}
+	// Window focus retargets the active channel without going through
+	// ChannelSelectedMsg, so it needs its own draft swap: park the
+	// outgoing channel's text and paint the incoming window's own.
 	if ch, ok := a.wins.Channel(id); ok && ch.ID != "" && ch.ID != a.activeChannelID {
+		a.drafts.stash(a.channelDraftKey(a.activeChannelID), &a.compose)
 		a.retargetActiveChannel(ch.ID, ch.Name, ch.Type)
+		a.drafts.restore(a.channelDraftKey(ch.ID), &a.compose)
 	}
 	return nil
 }

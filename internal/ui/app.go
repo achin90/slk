@@ -171,6 +171,10 @@ type App struct {
 	activeChannelID string
 	activeTeamID    string // workspace whose data is currently loaded into the side panels
 
+	// drafts holds unsent compose text for conversations that are not
+	// on screen. See internal/ui/drafts.go.
+	drafts *draftStore
+
 	// readStateReader returns the per-channel read-state map; same
 	// callback handed to the sidebar via SetReadStateReader. Retained
 	// on App so reduceChannelSelected can snapshot the pre-entry
@@ -545,6 +549,7 @@ func NewApp() *App {
 		workspaceDomains:      map[string]string{},
 		browserOpener:         openURLCmd,
 		navHistory:            newNavHistoryStore(),
+		drafts:                newDraftStore(),
 		clipboardRead:         defaultClipboardReader,
 		clipboardWrite:        defaultClipboardWriter,
 	}
@@ -1599,6 +1604,7 @@ func (a *App) openThreadPanel(parent messages.MessageItem, channelID, threadTS s
 	a.focusedPanel = PanelThread
 	a.threadPanel.SetThread(parent, nil, channelID, threadTS)
 	a.threadCompose.SetChannel("thread")
+	a.drafts.restore(a.threadDraftKey(channelID, threadTS), &a.threadCompose)
 	a.applyThreadUnreadBoundary(channelID)
 
 	threads := a.threads
@@ -1743,6 +1749,11 @@ func (a *App) ToggleThread() {
 }
 
 func (a *App) CloseThread() {
+	// Park any unsent reply under the thread being closed so it comes
+	// back when this thread is reopened, rather than following the user
+	// into the next thread. Must run before threadPanel.Clear() nils the
+	// thread TS the key is built from.
+	a.drafts.stash(a.threadDraftKey(a.threadPanel.ChannelID(), a.threadPanel.ThreadTS()), &a.threadCompose)
 	a.clearSelections()
 	a.threadVisible = false
 	a.statusbar.SetInThread(false)
@@ -1791,6 +1802,7 @@ func (a *App) openSelectedThreadCmd(debounce bool) tea.Cmd {
 	}
 	a.threadPanel.SetThread(parent, nil, sum.ChannelID, sum.ThreadTS)
 	a.threadCompose.SetChannel("thread")
+	a.drafts.restore(a.threadDraftKey(sum.ChannelID, sum.ThreadTS), &a.threadCompose)
 	// Snapshot the parent channel's last_read_ts BEFORE the local mark-
 	// read flips below, so the "── new ──" landmark in the thread panel
 	// reflects what the user had actually seen prior to opening this

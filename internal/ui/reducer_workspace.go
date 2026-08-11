@@ -280,6 +280,10 @@ func reduceWorkspaceSwitched(a *App, m WorkspaceSwitchedMsg) tea.Cmd {
 	// cross-workspace channel. The queued ChannelSelectedMsg for
 	// this workspace re-populates it.
 	a.resetWindowTree()
+	// Park the draft under the workspace being left (activeTeamID is
+	// still the old team here) so switching away and back does not
+	// silently discard typed text.
+	a.drafts.stash(a.channelDraftKey(a.activeChannelID), &a.compose)
 	a.compose.Reset()
 	a.statusbar.SetSyncing(false) // defensive: don't carry stale sync state across workspaces
 	// resetWindowTree replaced the pane with a fresh empty model;

@@ -331,6 +331,9 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 		}()
 	}
 	a.cancelEdit()
+	// Park the outgoing channel's unsent text before anything repaints
+	// the compose box. Restored below once the new channel is active.
+	a.drafts.stash(a.channelDraftKey(a.activeChannelID), &a.compose)
 	// Picking a channel always exits the Threads view.
 	a.view = ViewChannels
 	a.sidebar.SetThreadsActive(false)
@@ -376,6 +379,10 @@ func reduceChannelSelected(a *App, m ChannelSelectedMsg) (tea.Cmd, bool) {
 	a.threadCompose.CloseMention()
 
 	a.retargetActiveChannel(m.ID, m.Name, m.Type)
+	// Paint the compose box for the channel now being entered: its own
+	// draft if it has one, empty otherwise. Runs after the retarget so
+	// the key is built from the incoming channel.
+	a.drafts.restore(a.channelDraftKey(m.ID), &a.compose)
 	// Record the applied selection on the focused window so window
 	// focus changes can retarget to it (see internal/ui/windows.go).
 	a.setFocusedWindowChannel(m.ID, m.Name, m.Type)
