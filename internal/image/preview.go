@@ -198,7 +198,11 @@ func (p *Preview) renderImage(proto Protocol, target image.Point) Render {
 	if p.memoValid && p.memoFID == p.fid && p.memoProto == proto && p.memoTgt == target {
 		return p.memo
 	}
-	r := RenderImage(proto, p.img, target)
+	// Key the render on the Slack file ID rather than RenderImage's
+	// bounds-derived anon key: the preview shows a different image every
+	// time it is opened, and two images with the same dimensions would
+	// otherwise share a kitty image ID and re-display the previous one.
+	r := RenderImageKey(proto, "PV-"+p.fid, p.img, target)
 	p.memo, p.memoValid = r, true
 	p.memoFID, p.memoProto, p.memoTgt = p.fid, proto, target
 	return r

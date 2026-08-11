@@ -87,6 +87,26 @@ func RenderImage(proto Protocol, img image.Image, target image.Point) Render {
 	return Render{}
 }
 
+// RenderImageKey is RenderImage with a caller-supplied stable, content-
+// addressed cache key (e.g. "PV-<fileID>").
+//
+// Use this instead of RenderImage whenever the same logical surface
+// renders different images over time. RenderImage's kitty path derives
+// its key from the image bounds + target footprint alone
+// (KittyRenderer.Render), so two distinct images that happen to share
+// pixel dimensions and cell footprint collide on the same registry ID —
+// the second one resolves to fresh=false, skips the upload, and the
+// terminal keeps displaying the first image's bytes.
+//
+// Non-kitty protocols are stateless and ignore the key.
+func RenderImageKey(proto Protocol, key string, img image.Image, target image.Point) Render {
+	if proto != ProtoKitty || key == "" {
+		return RenderImage(proto, img, target)
+	}
+	kittyRendererInstance.SetSource(key, img)
+	return kittyRendererInstance.RenderKey(key, target)
+}
+
 // Singleton renderers — concrete instances appear in kitty.go / sixel.go.
 // Until those exist, fall back to half-block so this file builds in isolation.
 var (
