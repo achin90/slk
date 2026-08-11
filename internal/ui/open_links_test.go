@@ -135,3 +135,60 @@ func TestOpenLinkKey_FromThreadPanel(t *testing.T) {
 		t.Errorf("got %#v", cmd())
 	}
 }
+
+// A message whose only "link" is an uploaded file (video, PDF) is
+// reachable by `o`. The URL lives on the Attachment, not in the text,
+// so before this it reported "no links" despite rendering a visible
+// [File] link in the pane.
+func TestOpenLinkKey_AttachmentOnly_DispatchesOpenLinkMsg(t *testing.T) {
+	app := NewApp()
+	app.focusedPanel = PanelMessages
+	app.messagepane.SetMessages([]messages.MessageItem{{
+		TS:   "1.0",
+		Text: "check this out",
+		Attachments: []messages.Attachment{
+			{Kind: "file", Name: "demo.mp4", URL: "https://files.slack.com/f/demo.mp4"},
+		},
+	}})
+	cmd := pressO(app)
+	if cmd == nil {
+		t.Fatal("expected cmd")
+	}
+	msg, ok := cmd().(OpenLinkMsg)
+	if !ok {
+		t.Fatalf("expected OpenLinkMsg, got %#v", cmd())
+	}
+	if msg.URL != "https://files.slack.com/f/demo.mp4" {
+		t.Errorf("URL = %q", msg.URL)
+	}
+}
+
+// Text links and attachments together go to the picker, attachments
+// last, labelled with their filename.
+func TestOpenLinkKey_TextLinkPlusAttachment_OpensPicker(t *testing.T) {
+	app := NewApp()
+	app.focusedPanel = PanelMessages
+	app.messagepane.SetMessages([]messages.MessageItem{{
+		TS:   "1.0",
+		Text: "see <https://example.com/docs|docs>",
+		Attachments: []messages.Attachment{
+			{Kind: "file", Name: "demo.mp4", URL: "https://files.slack.com/f/demo.mp4"},
+		},
+	}})
+	if cmd := pressO(app); cmd != nil {
+		cmd()
+	}
+	if app.mode != ModeLinkPicker {
+		t.Fatalf("mode = %v, want ModeLinkPicker", app.mode)
+	}
+	items := app.linkPicker.Items()
+	if len(items) != 2 {
+		t.Fatalf("expected 2 picker items, got %d", len(items))
+	}
+	if items[1].URL != "https://files.slack.com/f/demo.mp4" {
+		t.Errorf("items[1].URL = %q, want the attachment", items[1].URL)
+	}
+	if items[1].Label != "demo.mp4" {
+		t.Errorf("items[1].Label = %q, want filename", items[1].Label)
+	}
+}

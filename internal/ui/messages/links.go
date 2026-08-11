@@ -52,3 +52,46 @@ func ExtractLinks(text string) []Link {
 	}
 	return out
 }
+
+// AppendAttachmentLinks appends one Link per attachment to links and
+// returns the combined slice, deduplicated by URL against the links
+// already present (text links win, since they carry the user's own
+// label).
+//
+// Attachment URLs live on the Attachment struct rather than in the
+// message text, so ExtractLinks alone can't see them — a message whose
+// only "link" is an uploaded video or PDF would otherwise report "no
+// links" even though the file is rendered right there in the pane.
+// Attachments sort after text links because they render below the
+// message body.
+func AppendAttachmentLinks(links []Link, atts []Attachment) []Link {
+	if len(atts) == 0 {
+		return links
+	}
+	seen := make(map[string]bool, len(links)+len(atts))
+	for _, l := range links {
+		seen[l.URL] = true
+	}
+	out := links
+	for _, att := range atts {
+		if att.URL == "" || seen[att.URL] {
+			continue
+		}
+		seen[att.URL] = true
+		out = append(out, Link{URL: att.URL, Label: attachmentLinkLabel(att)})
+	}
+	return out
+}
+
+// attachmentLinkLabel is the picker label for an attachment: its
+// filename when Slack supplied one, otherwise the same generic marker
+// the message pane renders ("[Image]" / "[File]").
+func attachmentLinkLabel(att Attachment) string {
+	if name := strings.TrimSpace(att.Name); name != "" {
+		return name
+	}
+	if att.Kind == "image" {
+		return "[Image]"
+	}
+	return "[File]"
+}
