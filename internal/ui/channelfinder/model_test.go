@@ -825,3 +825,46 @@ func TestSyntheticItemMatchesByName(t *testing.T) {
 			m.items[m.filtered[0]].Name)
 	}
 }
+
+// Before UpsertItem the list was only ever built at boot.
+func TestUpsertItem_AddsNewChannel(t *testing.T) {
+	m := New()
+	m.SetItems([]Item{{ID: "C1", Name: "general", Type: "channel", Joined: true}})
+
+	m.UpsertItem(Item{ID: "C2", Name: "design", Type: "channel", Joined: true})
+
+	items := m.Items()
+	if len(items) != 2 {
+		t.Fatalf("items = %d; want 2", len(items))
+	}
+	if items[1].ID != "C2" || items[1].Name != "design" {
+		t.Errorf("appended item = %+v; want C2/design", items[1])
+	}
+}
+
+func TestUpsertItem_ReplacesSameID(t *testing.T) {
+	m := New()
+	m.SetItems([]Item{{ID: "C1", Name: "old-name", Type: "channel"}})
+
+	m.UpsertItem(Item{ID: "C1", Name: "new-name", Type: "channel", Joined: true})
+
+	items := m.Items()
+	if len(items) != 1 {
+		t.Fatalf("items = %d; want 1 — a repeat event must not double-list the channel", len(items))
+	}
+	if items[0].Name != "new-name" || !items[0].Joined {
+		t.Errorf("item = %+v; want the newer name and Joined", items[0])
+	}
+}
+
+// Callers forward events that may carry no conversation at all.
+func TestUpsertItem_IgnoresZeroValue(t *testing.T) {
+	m := New()
+	m.SetItems([]Item{{ID: "C1", Name: "general", Type: "channel"}})
+
+	m.UpsertItem(Item{})
+
+	if got := len(m.Items()); got != 1 {
+		t.Errorf("items = %d; want 1", got)
+	}
+}

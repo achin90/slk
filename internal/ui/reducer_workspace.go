@@ -74,6 +74,9 @@ var reduceWorkspace reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 	case ConversationOpenedMsg:
 		if m.TeamID == a.activeTeamID {
 			a.sidebar.UpsertItem(m.Item)
+			// Separate list from the sidebar, populated at boot; without
+			// this Ctrl+T can't reach a channel joined mid-session.
+			a.channelFinder.UpsertItem(m.FinderItem)
 		}
 		// Inactive-workspace events update WorkspaceContext.Channels
 		// from the rtmEventHandler in cmd/slk/main.go (Task 6);

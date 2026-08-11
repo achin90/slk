@@ -107,7 +107,7 @@ type WorkspaceContext struct {
 	// Edge is the edgeapi client for this workspace: the
 	// conditional-revalidation and server-side-search endpoints. Nil
 	// only if construction failed, and every caller nil-checks.
-	Edge       *edge.Client
+	Edge *edge.Client
 	// EdgeHealth records whether edge resolution is working for this
 	// workspace this session. bootstrap marks it degraded on a
 	// wholesale failure; the user resolver reads it to skip batch
@@ -4005,6 +4005,11 @@ type rtmEventHandler struct {
 	// Back-reference for self-presence/DND state mutation.
 	wsCtx *WorkspaceContext
 
+	// channelsMu guards wsCtx.Channels and wsCtx.FinderItems. Every
+	// other writer is the single WS read loop; reconnect hydration runs
+	// in the reconnect-sync goroutine.
+	channelsMu sync.Mutex
+
 	// backfillGate enforces a 30 s minimum between reconnect-driven
 	// catch-up passes. Per-handler so each workspace has its own gate.
 	// Initialized at construction with window = 30 * time.Second.
@@ -4448,6 +4453,7 @@ func (h *rtmEventHandler) syncOnReconnect(trigger string) bool {
 		program:        h.program,
 		activeChannel:  h.activeChannelID,
 		refreshChannel: h.refreshChannel,
+		hydrateChannel: h.hydrateChannel,
 	}
 	go func() {
 		if err := sync.run(context.Background()); err != nil {
@@ -4625,6 +4631,7 @@ func (h *rtmEventHandler) OnConversationOpened(ch slack.Channel) {
 	// No read-state preservation is needed: those fields no longer
 	// live on ChannelItem; the read-state DB (per workspace) is the
 	// single source of truth and is unaffected by this in-memory upsert.
+	h.channelsMu.Lock()
 	replaced := false
 	for i := range h.wsCtx.Channels {
 		if h.wsCtx.Channels[i].ID == item.ID {
@@ -4643,6 +4650,7 @@ func (h *rtmEventHandler) OnConversationOpened(ch slack.Channel) {
 		finderItem.LastVisited = h.wsCtx.LastVisitedByChannel[ch.ID]
 		h.wsCtx.FinderItems = append(h.wsCtx.FinderItems, finderItem)
 	}
+	h.channelsMu.Unlock()
 
 	// Mirror channelTypes / channelNames maps used by the notifier so
 	// follow-up messages on this channel get notified correctly.
@@ -4661,10 +4669,12 @@ func (h *rtmEventHandler) OnConversationOpened(ch slack.Channel) {
 		// UI message until the user switches into this workspace.
 		return
 	}
-	h.program.Send(ui.ConversationOpenedMsg{
-		TeamID: h.workspaceID,
-		Item:   item,
-	})
+	msg := ui.ConversationOpenedMsg{TeamID: h.workspaceID, Item: item}
+	if !replaced {
+		// Same reasoning as the FinderItems append above.
+		msg.FinderItem = finderItem
+	}
+	h.program.Send(msg)
 }
 
 // refreshSectionsForActive re-syncs every wctx.Channels item's Section
@@ -4791,6 +4801,44 @@ func (h *rtmEventHandler) OnMemberJoined(channelID, userID string) {
 		return
 	}
 	h.wsCtx.Membership.ApplyJoin(channelID, userID)
+	// Slack does not reliably follow this with a channel_joined for the
+	// added user, so being added by someone else would otherwise stay
+	// invisible until restart.
+	if userID != "" && userID == h.currentUserID {
+		h.hydrateChannel(channelID)
+	}
+}
+
+// hydrateChannel loads a conversation slk has no record of and feeds it
+// through OnConversationOpened, the path channel_joined takes. Known
+// channels return false without fetching, so it is safe to call
+// speculatively; the bool lets the reconnect caller bound its fetches.
+//
+// The fetch is synchronous to keep the callers — the WS read loop and
+// the reconnect-sync goroutine — the only writers of the channel slices.
+func (h *rtmEventHandler) hydrateChannel(channelID string) bool {
+	if h.wsCtx == nil || h.wsCtx.Client == nil || channelID == "" {
+		return false
+	}
+	h.channelsMu.Lock()
+	for _, c := range h.wsCtx.Channels {
+		if c.ID == channelID {
+			h.channelsMu.Unlock()
+			return false
+		}
+	}
+	h.channelsMu.Unlock()
+
+	ch, err := h.wsCtx.Client.GetChannelInfo(channelID)
+	if err != nil {
+		debuglog.Backfill("team=%s hydrate channel=%s failed err=%v",
+			h.workspaceID, channelID, err)
+		return true
+	}
+	debuglog.Backfill("team=%s hydrate channel=%s name=%s",
+		h.workspaceID, channelID, ch.Name)
+	h.OnConversationOpened(*ch)
+	return true
 }
 
 func (h *rtmEventHandler) OnMemberLeft(channelID, userID string) {

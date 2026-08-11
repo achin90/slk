@@ -272,6 +272,10 @@ type (
 	ConversationOpenedMsg struct {
 		TeamID string
 		Item   sidebar.ChannelItem
+		// FinderItem is the same conversation as a Ctrl+T row. Zero
+		// value when the conversation was already known, since the
+		// finder already lists it.
+		FinderItem channelfinder.Item
 	}
 	// SectionsRefreshedMsg is sent when a workspace's Slack-native
 	// section state has mutated (via channel_section_* WS events) and

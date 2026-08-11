@@ -24,6 +24,9 @@ import (
 // This interface enables mocking in tests.
 type SlackAPI interface {
 	GetConversationsForUser(params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error)
+	// conversations.info: one channel by ID, not enumeration. See
+	// TestSlackAPI_DeclaresNoWorkspaceEnumeration.
+	GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error)
 	GetConversationHistory(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 	GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	SearchMessagesContext(ctx context.Context, query string, params slack.SearchParameters) (*slack.SearchMessages, error)
@@ -502,6 +505,20 @@ func (c *Client) SubscribePresence(userIDs []string) error {
 // GetChannels retrieves conversations the user is a member of (channels, DMs,
 // group DMs), paginating automatically. Uses users.conversations which returns
 // only joined channels — much faster than conversations.list for large workspaces.
+// GetChannelInfo fetches one conversation by ID, for channels slk
+// learns about after boot. Re-paging the whole joined list would be the
+// wrong shape of request for a single new channel.
+func (c *Client) GetChannelInfo(channelID string) (*slack.Channel, error) {
+	if channelID == "" {
+		return nil, fmt.Errorf("empty channel ID")
+	}
+	ch, err := c.api.GetConversationInfo(&slack.GetConversationInfoInput{ChannelID: channelID})
+	if err != nil {
+		return nil, fmt.Errorf("conversations.info for %s: %w", channelID, err)
+	}
+	return ch, nil
+}
+
 func (c *Client) GetChannels(ctx context.Context) ([]slack.Channel, error) {
 	var allChannels []slack.Channel
 	cursor := ""

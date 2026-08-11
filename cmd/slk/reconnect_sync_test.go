@@ -385,3 +385,100 @@ func TestReconnect_NoActiveChannelMakesNoHistoryCall(t *testing.T) {
 		t.Errorf("calls = %v; want only client.counts", got)
 	}
 }
+
+// The socket does not backfill channel_joined, but counts lists the
+// channel, so reconnect is the one place slk can notice a join it slept
+// through.
+func TestReconnect_HydratesChannelUnknownAtBoot(t *testing.T) {
+	db := newTestDB(t)
+	seedWorkspaceChannels(t, db, 1)
+
+	fc := &fakeCounts{unreads: []slackclient.UnreadInfo{
+		{ChannelID: "C000", HasUnread: false},
+		{ChannelID: "CNEW", HasUnread: true},
+	}}
+	var hydrated []string
+	r := &reconnectSync{
+		client: fc, db: db, workspaceID: "T1", program: &captureSender{},
+		activeChannel:  func() string { return "" },
+		refreshChannel: func(context.Context, string) {},
+		hydrateChannel: func(id string) bool {
+			if id == "C000" { // already known
+				return false
+			}
+			hydrated = append(hydrated, id)
+			return true
+		},
+	}
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(hydrated) != 1 || hydrated[0] != "CNEW" {
+		t.Errorf("hydrated = %v; want [CNEW] — the channel added while disconnected stays invisible until restart", hydrated)
+	}
+}
+
+// The cap counts requests, not IDs — counts reports every conversation
+// the user belongs to, so counting IDs would stop before reaching an
+// unknown channel in a busy workspace.
+func TestReconnect_HydrateCapCountsFetchesNotIDs(t *testing.T) {
+	db := newTestDB(t)
+	seedWorkspaceChannels(t, db, 1)
+
+	unreads := make([]slackclient.UnreadInfo, 0, 40)
+	for i := 0; i < 39; i++ {
+		unreads = append(unreads, slackclient.UnreadInfo{ChannelID: "KNOWN"})
+	}
+	unreads = append(unreads, slackclient.UnreadInfo{ChannelID: "CNEW"})
+
+	var fetches int
+	r := &reconnectSync{
+		client: &fakeCounts{unreads: unreads}, db: db, workspaceID: "T1",
+		program:        &captureSender{},
+		activeChannel:  func() string { return "" },
+		refreshChannel: func(context.Context, string) {},
+		hydrateChannel: func(id string) bool {
+			if id == "KNOWN" {
+				return false
+			}
+			fetches++
+			return true
+		},
+	}
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if fetches != 1 {
+		t.Errorf("fetches = %d; want 1 — the unknown channel sat past 39 known ones and must still be reached", fetches)
+	}
+}
+
+// A boot list can be missing dozens of channels, so the loop has to stop
+// somewhere.
+func TestReconnect_HydrateStopsAtCap(t *testing.T) {
+	db := newTestDB(t)
+	seedWorkspaceChannels(t, db, 1)
+
+	unreads := make([]slackclient.UnreadInfo, 0, maxHydratePerSync+5)
+	for i := 0; i < maxHydratePerSync+5; i++ {
+		unreads = append(unreads, slackclient.UnreadInfo{ChannelID: fmt.Sprintf("CNEW%02d", i)})
+	}
+
+	var fetches int
+	r := &reconnectSync{
+		client: &fakeCounts{unreads: unreads}, db: db, workspaceID: "T1",
+		program:        &captureSender{},
+		activeChannel:  func() string { return "" },
+		refreshChannel: func(context.Context, string) {},
+		hydrateChannel: func(string) bool { fetches++; return true },
+	}
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if fetches != maxHydratePerSync {
+		t.Errorf("fetches = %d; want the cap %d", fetches, maxHydratePerSync)
+	}
+}

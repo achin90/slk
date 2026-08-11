@@ -17,6 +17,7 @@ import (
 	"github.com/gammons/slk/internal/cache"
 	"github.com/gammons/slk/internal/ids"
 	imgpkg "github.com/gammons/slk/internal/image"
+	"github.com/gammons/slk/internal/ui/channelfinder"
 	"github.com/gammons/slk/internal/ui/compose"
 	"github.com/gammons/slk/internal/ui/messages"
 	"github.com/gammons/slk/internal/ui/sidebar"
@@ -4495,5 +4496,48 @@ func TestPasteMsg_DroppedPathBeatsStaleClipboardImage(t *testing.T) {
 	}
 	if got := app.compose.Value(); got != "" {
 		t.Errorf("path text leaked into compose: %q", got)
+	}
+}
+
+// The finder is a separate list from the sidebar, so forwarding only the
+// sidebar item left the channel unreachable by name until restart.
+func TestConversationOpenedMsg_FinderReceivesItem(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+
+	app.Update(ConversationOpenedMsg{
+		TeamID:     "T1",
+		Item:       sidebar.ChannelItem{ID: "C9", Name: "design", Type: "channel"},
+		FinderItem: channelfinder.Item{ID: "C9", Name: "design", Type: "channel", Joined: true},
+	})
+
+	var found bool
+	for _, it := range app.channelFinder.Items() {
+		if it.ID == "C9" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("C9 missing from the finder after ConversationOpenedMsg; Ctrl+T could not reach it")
+	}
+}
+
+// A repeat event for a known conversation carries no finder item, and
+// must not add an empty row.
+func TestConversationOpenedMsg_ZeroFinderItemAddsNothing(t *testing.T) {
+	app := NewApp()
+	app.activeTeamID = "T1"
+	app.channelFinder.SetItems([]channelfinder.Item{{ID: "C1", Name: "general", Type: "channel"}})
+	// Not 1: the finder keeps synthetic rows (the "Threads" destination)
+	// ahead of real channels, so the baseline is whatever is there now.
+	before := len(app.channelFinder.Items())
+
+	app.Update(ConversationOpenedMsg{
+		TeamID: "T1",
+		Item:   sidebar.ChannelItem{ID: "C1", Name: "general", Type: "channel"},
+	})
+
+	if got := len(app.channelFinder.Items()); got != before {
+		t.Errorf("finder items = %d; want %d unchanged — a repeat event added a row", got, before)
 	}
 }

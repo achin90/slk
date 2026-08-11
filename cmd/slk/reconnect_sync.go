@@ -77,7 +77,17 @@ type reconnectSync struct {
 	// normal open path and pushes the result into the UI. Required;
 	// tests substitute a recorder.
 	refreshChannel func(ctx context.Context, channelID string)
+
+	// hydrateChannel loads a conversation slk has no record of, and
+	// reports whether it fetched. No-op for known channels, so it can
+	// be called for every ID counts reports. Nil disables hydration.
+	hydrateChannel func(channelID string) bool
 }
+
+// maxHydratePerSync bounds conversations.info calls per pass. The boot
+// list can be missing dozens of channels, so an uncapped loop would
+// fetch all of them at once.
+const maxHydratePerSync = 5
 
 // run performs one catch-up pass.
 //
@@ -143,6 +153,27 @@ func (r *reconnectSync) refreshUnreadState() {
 	}
 	if r.program != nil {
 		r.program.Send(ui.ReadStateChangedMsg{WorkspaceID: r.workspaceID})
+	}
+	r.hydrateUnknownChannels(unreads)
+}
+
+// hydrateUnknownChannels picks up conversations the user was added to
+// while slk was disconnected. counts already listed them, so this costs
+// nothing unless an ID is genuinely unfamiliar.
+func (r *reconnectSync) hydrateUnknownChannels(unreads []slackclient.UnreadInfo) {
+	if r.hydrateChannel == nil {
+		return
+	}
+	fetched := 0
+	for _, u := range unreads {
+		if fetched >= maxHydratePerSync {
+			debuglog.Backfill("team=%s reconnect-sync hydrate cap reached (%d), remaining unknown channels deferred to next boot",
+				r.workspaceID, maxHydratePerSync)
+			return
+		}
+		if r.hydrateChannel(u.ChannelID) {
+			fetched++
+		}
 	}
 }
 

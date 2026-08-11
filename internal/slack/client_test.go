@@ -138,6 +138,7 @@ func TestSendMessage_EmptyTextSendsNoBlocks(t *testing.T) {
 type mockSlackAPI struct {
 	authTestFn                      func() (*slack.AuthTestResponse, error)
 	getConversationHistoryFn        func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
+	getConversationInfoFn           func(input *slack.GetConversationInfoInput) (*slack.Channel, error)
 	getConversationRepliesFn        func(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	getEmojiFn                      func() (map[string]string, error)
 	getPermalinkContextFn           func(ctx context.Context, params *slack.PermalinkParameters) (string, error)
@@ -170,6 +171,13 @@ func (m *mockSlackAPI) SearchMessagesContext(ctx context.Context, query string, 
 
 func (m *mockSlackAPI) GetConversationsForUser(params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error) {
 	return nil, "", nil
+}
+
+func (m *mockSlackAPI) GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error) {
+	if m.getConversationInfoFn != nil {
+		return m.getConversationInfoFn(input)
+	}
+	return &slack.Channel{}, nil
 }
 
 func (m *mockSlackAPI) GetConversationHistory(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {

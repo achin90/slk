@@ -76,6 +76,29 @@ func (m *Model) SetItems(items []Item) {
 	m.items = append(synth, items...)
 }
 
+// UpsertItem adds one channel to the searchable list, replacing any row
+// with the same ID. For conversations joined after boot, which the
+// boot-built list would otherwise miss until restart. A zero-value item
+// is ignored so callers need no guard of their own.
+func (m *Model) UpsertItem(item Item) {
+	if item.ID == "" {
+		return
+	}
+	for i := range m.items {
+		if m.items[i].ID == item.ID {
+			m.items[i] = item
+			if m.visible {
+				m.filter()
+			}
+			return
+		}
+	}
+	m.items = append(m.items, item)
+	if m.visible {
+		m.filter()
+	}
+}
+
 // UpdatePresenceByUser updates the Presence field on any DM item whose
 // DMUserID matches, applying live presence_change events without a full
 // SetItems rebuild. Re-runs filter() if the finder is visible so the
