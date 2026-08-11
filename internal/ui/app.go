@@ -628,6 +628,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		reduceSend,
 		reduceChannels,
 		reduceLinks,
+		reduceDownload,
 		reduceSearch,
 		reduceWorkspace,
 		reduceNewMessagePicker,
@@ -1108,17 +1109,43 @@ func (a *App) openLinksOfSelected() tea.Cmd {
 	case 0:
 		return func() tea.Msg { return ToastMsg{Text: "No links in message"} }
 	case 1:
-		url := links[0].URL
-		return func() tea.Msg { return OpenLinkMsg{URL: url} }
+		return openLinkItemCmd(a.pickerItem(links[0]))
 	default:
 		items := make([]linkpicker.Item, len(links))
 		for i, l := range links {
-			items[i] = linkpicker.Item{URL: l.URL, Label: l.Label, InApp: a.linkOpensInApp(l.URL)}
+			items[i] = a.pickerItem(l)
 		}
 		a.linkPicker.Open(items)
 		a.SetMode(ModeLinkPicker)
 		return nil
 	}
+}
+
+// pickerItem converts a link into a picker row. Attachment rows are
+// never "in app": their URL is a file download, not a permalink the
+// router could navigate to.
+func (a *App) pickerItem(l messages.Link) linkpicker.Item {
+	return linkpicker.Item{
+		URL:      l.URL,
+		Label:    l.Label,
+		InApp:    !l.Download && a.linkOpensInApp(l.URL),
+		Download: l.Download,
+		Name:     l.Name,
+		Mime:     l.Mime,
+	}
+}
+
+// openLinkItemCmd dispatches the right open for a chosen row: file
+// attachments download (reduceDownload), everything else routes
+// through OpenLinkMsg as before. Shared by the single-link path and
+// the picker so both behave identically.
+func openLinkItemCmd(it linkpicker.Item) tea.Cmd {
+	if it.Download {
+		return func() tea.Msg {
+			return DownloadFileMsg{URL: it.URL, Name: it.Name, Mime: it.Mime}
+		}
+	}
+	return func() tea.Msg { return OpenLinkMsg{URL: it.URL} }
 }
 
 // linkOpensInApp reports whether routeLink would navigate this URL

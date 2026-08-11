@@ -475,6 +475,18 @@ type MessageDeletedMsg struct {
 // picker modal.
 type OpenLinkMsg struct{ URL string }
 
+// DownloadFileMsg requests that a Slack file attachment be downloaded
+// to disk. Dispatched by the `o` keybinding (and the link picker) for
+// attachment rows, which carry a url_private serving the real bytes —
+// unlike a permalink, which the browser would only render as a page.
+// Handled by reduceDownload, which hands media off to the system
+// player once saved.
+type DownloadFileMsg struct {
+	URL  string
+	Name string // Slack's filename; may be empty
+	Mime string // may be empty, then taken from the response
+}
+
 // MarkUnreadMsg requests the App to mark the given message as unread.
 // ThreadTS is "" for channel-level mark-unread; non-empty for thread-level
 // (in which case ChannelID is the parent channel and BoundaryTS is the

@@ -14,8 +14,7 @@ func handleLinkPickerMode(a *App, msg tea.KeyMsg) tea.Cmd {
 	item, chosen := a.linkPicker.HandleKey(msg.String())
 	if chosen {
 		a.SetMode(ModeNormal)
-		url := item.URL
-		return func() tea.Msg { return OpenLinkMsg{URL: url} }
+		return openLinkItemCmd(item)
 	}
 	if !a.linkPicker.IsVisible() {
 		// esc/q closed the picker.

@@ -10,10 +10,19 @@ import (
 	"strings"
 )
 
-// Link is one link found in a message's text.
+// Link is one link found in a message's text, or one file attached to
+// it (see AppendAttachmentLinks).
 type Link struct {
 	URL   string
 	Label string // empty for bare <url> links
+
+	// Download marks a link whose URL serves raw file bytes rather
+	// than a web page, so opening it means downloading the file
+	// instead of handing the URL to the browser. Set only for
+	// attachments, and only when Slack gave us a url_private.
+	Download bool
+	Name     string // attachment filename, for naming the saved file
+	Mime     string // attachment mimetype, for deciding how to open it
 }
 
 // ExtractLinks returns the links in text in order of appearance,
@@ -74,11 +83,25 @@ func AppendAttachmentLinks(links []Link, atts []Attachment) []Link {
 	}
 	out := links
 	for _, att := range atts {
-		if att.URL == "" || seen[att.URL] {
+		// Prefer url_private: it serves the file's actual bytes, so the
+		// link can be downloaded. att.URL is a permalink (an HTML page)
+		// or, for images, a thumbnail — neither is the real file. Older
+		// cached messages may lack url_private; those fall back to the
+		// permalink and open in the browser as before.
+		link := Link{Label: attachmentLinkLabel(att)}
+		if att.FallbackURL != "" {
+			link.URL = att.FallbackURL
+			link.Download = true
+			link.Name = att.Name
+			link.Mime = att.Mime
+		} else {
+			link.URL = att.URL
+		}
+		if link.URL == "" || seen[link.URL] {
 			continue
 		}
-		seen[att.URL] = true
-		out = append(out, Link{URL: att.URL, Label: attachmentLinkLabel(att)})
+		seen[link.URL] = true
+		out = append(out, link)
 	}
 	return out
 }

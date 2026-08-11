@@ -37,7 +37,7 @@ func TestTryDownload_NoCustomUserAgent(t *testing.T) {
 	client := slackhttp.NewBrowserHTTPClient(nil)
 	f := &Fetcher{http: client}
 
-	body, _, status, err := f.tryDownload(context.Background(), srv.URL, TeamAuth{})
+	body, _, status, err := f.tryDownload(context.Background(), srv.URL, TeamAuth{}, f.http)
 	if err != nil {
 		t.Fatalf("tryDownload: %v", err)
 	}

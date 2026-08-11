@@ -2785,13 +2785,16 @@ func extractAttachments(files []slack.File) []messages.Attachment {
 			name = f.Name
 		}
 		att := messages.Attachment{Kind: kind, Name: name, URL: pickAttachmentURL(f, kind)}
+		// FileID/Mime/FallbackURL are kept for every kind: the `o`
+		// keybinding downloads a file's real bytes, and url_private is
+		// the only URL that serves them (Permalink is an HTML page).
+		att.FileID = f.ID
+		att.Mime = f.Mimetype
+		att.FallbackURL = f.URLPrivate
 		if kind == "image" {
-			att.FileID = f.ID
-			att.Mime = f.Mimetype
 			att.Thumbs = collectThumbs(f)
 			att.OriginalW = f.OriginalW
 			att.OriginalH = f.OriginalH
-			att.FallbackURL = f.URLPrivate
 		}
 		out = append(out, att)
 	}

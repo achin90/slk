@@ -11,6 +11,11 @@ type Item struct {
 	// InApp marks links that the router will navigate inside slk
 	// (active-workspace archive permalinks); rendered with a badge.
 	InApp bool
+	// Download marks a file attachment: choosing it downloads the
+	// file rather than opening the URL in a browser.
+	Download bool
+	Name     string // attachment filename
+	Mime     string // attachment mimetype
 }
 
 // Model is the link picker overlay state.
