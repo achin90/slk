@@ -1080,36 +1080,31 @@ func (a *App) copyPermalinkOfSelected() tea.Cmd {
 }
 
 // openLinksOfSelected implements the `o` keybinding: collect the
-// links in the selected message (messages pane or thread panel),
-// both those in its text and those of its file attachments.
+// links in the selected message (messages pane or thread panel) —
+// its text, its Block Kit and legacy-attachment card contents, and
+// its file attachments. See messages.MessageLinks.
 // 0 links -> toast; 1 link -> dispatch OpenLinkMsg directly; 2+ ->
 // open the link picker modal. All opens converge on OpenLinkMsg,
 // the single routing point in reducer_links.go.
 func (a *App) openLinksOfSelected() tea.Cmd {
-	var text string
-	var atts []messages.Attachment
+	var msg messages.MessageItem
 	switch a.focusedPanel {
 	case PanelMessages:
-		msg, ok := a.messagepane.SelectedMessage()
+		selected, ok := a.messagepane.SelectedMessage()
 		if !ok {
 			return nil
 		}
-		text = msg.Text
-		atts = msg.Attachments
+		msg = selected
 	case PanelThread:
 		reply := a.threadPanel.SelectedReply()
 		if reply == nil {
 			return nil
 		}
-		text = reply.Text
-		atts = reply.Attachments
+		msg = *reply
 	default:
 		return nil
 	}
-	// Attachments count as links: an uploaded video or PDF renders as
-	// a "[File] <url>" line, and `o` is the only keyboard route to it
-	// (the image preview handles images, but nothing handled the rest).
-	links := messages.AppendAttachmentLinks(messages.ExtractLinks(text), atts)
+	links := messages.MessageLinks(msg)
 	switch len(links) {
 	case 0:
 		return func() tea.Msg { return ToastMsg{Text: "No links in message"} }
