@@ -26,6 +26,7 @@ type KeyMap struct {
 	FuzzyFinderAlt      key.Binding
 	Top                 key.Binding
 	Bottom              key.Binding
+	JumpToParent        key.Binding
 	PageUp              key.Binding
 	PageDown            key.Binding
 	HalfPageUp          key.Binding
@@ -87,6 +88,9 @@ func DefaultKeyMap() KeyMap {
 		FuzzyFinderAlt:  key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "switch channel")),
 		Top:             key.NewBinding(key.WithKeys("g"), key.WithHelp("gg", "top")),
 		Bottom:          key.NewBinding(key.WithKeys("G"), key.WithHelp("G", "bottom")),
+		// Second key of the `gp` chord, like Top's "g" above: the bound
+		// key is what follows the g, the help text is the whole chord.
+		JumpToParent: key.NewBinding(key.WithKeys("p"), key.WithHelp("gp", "jump to thread parent")),
 		PageUp:          key.NewBinding(key.WithKeys("pgup"), key.WithHelp("PgUp", "page up")),
 		PageDown:        key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("PgDn", "page down")),
 		HalfPageUp:      key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "half page up")),

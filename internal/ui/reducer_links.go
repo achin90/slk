@@ -132,3 +132,55 @@ func (a *App) openThreadForPermalink(channelID, threadTS string) tea.Cmd {
 
 	return a.openThreadPanel(parent, channelID, threadTS)
 }
+
+// jumpToSelectedParent takes the user from a thread to the parent
+// message in its channel. Bound to `gp`, and valid from both the
+// threads view and an open thread panel.
+//
+// The thread closes on the way out: the request is to go look at the
+// channel, and leaving the panel open covers the message just landed on.
+func (a *App) jumpToSelectedParent() tea.Cmd {
+	channelID, parentTS := a.selectedThreadParent()
+	if channelID == "" || parentTS == "" {
+		return func() tea.Msg { return ToastMsg{Text: "No thread selected"} }
+	}
+
+	if a.threadVisible {
+		a.CloseThread()
+	}
+	a.view = ViewChannels
+	a.sidebar.SetThreadsActive(false)
+
+	// Same machinery as an in-app permalink: the parent may be on
+	// screen, out of the loaded window, or in another channel, and
+	// pendingLinkNav already resolves all three.
+	a.pendingLinkNav = &pendingLinkNav{channelID: channelID, messageTS: parentTS}
+	if channelID == a.activeChannelID {
+		return a.completePendingLinkNav(channelID, true)
+	}
+	name, chType, found := a.channels.Lookup(ids.ChannelID(channelID))
+	if !found {
+		a.pendingLinkNav = nil
+		return func() tea.Msg { return ToastMsg{Text: "Channel not available"} }
+	}
+	return func() tea.Msg {
+		return ChannelSelectedMsg{ID: channelID, Name: name, Type: chType}
+	}
+}
+
+// selectedThreadParent resolves the thread the user means: the open
+// thread panel takes precedence over the threads-view cursor, since a
+// panel opened from the list is the more specific selection.
+func (a *App) selectedThreadParent() (channelID, parentTS string) {
+	if a.threadVisible {
+		if id, ts := a.threadPanel.ChannelID(), a.threadPanel.ThreadTS(); id != "" && ts != "" {
+			return id, ts
+		}
+	}
+	if a.view == ViewThreads {
+		if sum, ok := a.threadsView.SelectedSummary(); ok {
+			return sum.ChannelID, sum.ParentTS
+		}
+	}
+	return "", ""
+}

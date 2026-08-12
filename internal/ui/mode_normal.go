@@ -54,6 +54,9 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		if msg.String() == "g" {
 			return a.handleGoToTop()
 		}
+		if msg.String() == "p" {
+			return a.jumpToSelectedParent()
+		}
 		// non-g: fall through to normal key handling
 	}
 
@@ -199,7 +202,7 @@ func handleNormalMode(a *App, msg tea.KeyMsg) tea.Cmd {
 		// state and wait for the second `g` (handled by the
 		// pendingG intercept at the top of this function).
 		a.pendingG = true
-		a.statusbar.SetHelpHint("g …")
+		a.statusbar.SetHelpHint("g … (g top, p parent)")
 		return nil
 
 	case key.Matches(msg, a.keys.Bottom):
