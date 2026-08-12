@@ -17,6 +17,13 @@ type EventHandler interface {
 	// for bot posts, "thread_broadcast" for thread replies that the
 	// author also sent to the main channel. files carries any file
 	// attachments on the message (empty for plain text messages).
+	//
+	// edited is not read from the payload — it is true iff the event
+	// arrived as a message_changed, which Slack sends both for real
+	// edits and for silent metadata refreshes (e.g. a thread parent
+	// whose reply_count changed). Read it as "not new activity": it
+	// gates the alerting paths in rtmEventHandler.OnMessage. Narrowing
+	// it to human edits would let a parent-refresh raise a mention.
 	OnMessage(channelID, userID, ts, text, threadTS, subtype string, edited bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment, botID, username string)
 	OnMessageDeleted(channelID, ts string)
 	OnReactionAdded(channelID, ts, userID, emoji string)
