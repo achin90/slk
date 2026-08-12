@@ -232,6 +232,70 @@ func TestOnMessage_ThreadBroadcast_SetsHasUnread(t *testing.T) {
 	}
 }
 
+// Posting a thread reply makes Slack push a message_changed for the
+// thread *parent* (reply_count/latest_reply changed). That re-enters
+// OnMessage with edited=true, the parent's author and the parent's text
+// — bypassing ShouldNotify's self-message suppression and, if the parent
+// mentions you, raising a mention badge off your own reply. A
+// message_changed is never new activity, so it must not touch read state
+// or the mention count.
+
+func TestOnMessage_Edited_DoesNotSetHasUnread(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	h := &rtmEventHandler{
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C2" },
+	}
+	// Parent-refresh echo: top-level message (threadTS == ts), edited=true.
+	h.OnMessage("C1", "U1", "1.001", "hi <@ME>", "1.001", "", true, nil, slack.Blocks{}, nil, "", "")
+
+	s, _ := db.GetChannelReadState("C1")
+	if s.HasUnread {
+		t.Errorf("HasUnread = true, want false (message_changed is not new activity)")
+	}
+}
+
+func TestOnMessage_Edited_DoesNotIncrementMentionCount(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	h := &rtmEventHandler{
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		currentUserID:   "ME",
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C2" },
+	}
+	// Parent authored by someone else and mentioning us: without the
+	// !edited gate this increments the badge every time we reply.
+	h.OnMessage("C1", "U1", "1.001", "hey <@ME>", "1.001", "", true, nil, slack.Blocks{}, nil, "", "")
+
+	s, _ := db.GetChannelReadState("C1")
+	if s.MentionCount != 0 {
+		t.Errorf("MentionCount = %d, want 0 (message_changed must not bump the badge)", s.MentionCount)
+	}
+}
+
+func TestOnMessage_Mention_IncrementsMentionCount(t *testing.T) {
+	db := newTestDB(t)
+	_ = db.UpsertChannel(cache.Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel"})
+	h := &rtmEventHandler{
+		db:              db,
+		wsCtx:           &WorkspaceContext{},
+		currentUserID:   "ME",
+		isActive:        func() bool { return true },
+		activeChannelID: func() string { return "C2" },
+	}
+	h.OnMessage("C1", "U1", "1.001", "hey <@ME>", "", "", false, nil, slack.Blocks{}, nil, "", "")
+
+	s, _ := db.GetChannelReadState("C1")
+	if s.MentionCount != 1 {
+		t.Errorf("MentionCount = %d, want 1 (real mention still counts)", s.MentionCount)
+	}
+}
+
 func TestOnThreadMarked_UpsertsSubscription(t *testing.T) {
 	db := newTestDB(t)
 	h := &rtmEventHandler{

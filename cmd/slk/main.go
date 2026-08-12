@@ -4120,7 +4120,17 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	// Check if this message should trigger a desktop notification.
 	// Do this before the active workspace check so inactive workspaces
 	// can still trigger notifications.
-	if h.notifier != nil && h.notifyCfg.Enabled {
+	//
+	// edited==true means this came from a message_changed event, which
+	// is never new activity: Slack sends it both for real edits and for
+	// silent metadata refreshes. Posting a thread reply makes Slack push
+	// a message_changed for the *parent* (its reply_count/latest_reply
+	// changed), carrying the parent's author and text — so the
+	// self-message suppression in ShouldNotify doesn't fire and the
+	// user gets alerted by their own reply. Alerting is gated on !edited
+	// for all three blocks below; the cache/UI paths further down still
+	// run so edits and thumbnail refreshes render.
+	if h.notifier != nil && h.notifyCfg.Enabled && !edited {
 		isActiveWS := h.isActive != nil && h.isActive()
 		activeChID := ""
 		if h.activeChannelID != nil {
@@ -4186,7 +4196,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	if h.activeChannelID != nil {
 		activeChIDForRead = h.activeChannelID()
 	}
-	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
+	if h.db != nil && shouldMarkChannel && !edited && activeChIDForRead != channelID {
 		if err := h.db.UpdateChannelReadState(channelID, "", true); err != nil {
 			log.Printf("Warning: failed to set has_unread for %s: %v", channelID, err)
 		}
@@ -4201,7 +4211,7 @@ func (h *rtmEventHandler) OnMessage(channelID, userID, ts, text, threadTS, subty
 	// they just don't notify). Muted channels and self-messages are
 	// excluded. Reuses ShouldNotify with all triggers enabled and DND
 	// suppressed.
-	if h.db != nil && shouldMarkChannel && activeChIDForRead != channelID {
+	if h.db != nil && shouldMarkChannel && !edited && activeChIDForRead != channelID {
 		mentionCtx := notify.NotifyContext{
 			CurrentUserID:   h.currentUserID,
 			ActiveChannelID: activeChIDForRead,
