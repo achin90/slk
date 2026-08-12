@@ -5,35 +5,38 @@
 // Owns the nine Update arms that drive the channel-selection
 // lifecycle and channel-list mutations:
 //
-//   ChannelSelectedMsg            - user picked a channel: reset
-//                                   view state, mark visit,
-//                                   dispatch by cache freshness
-//                                   tier (fresh / verify-in-bg /
-//                                   spinner).
-//   MessagesLoadedMsg             - initial messages fetch landed:
-//                                   replace pane contents (nil =
-//                                   network failure, keep cache).
-//   OlderMessagesLoadedMsg        - history backfill landed:
-//                                   prepend (anchor-validated: dropped
-//                                   if the buffer was replaced
-//                                   mid-flight).
-//   ChannelMarkedRemoteMsg        - WS echo of a remote mark:
-//                                   apply locally.
-//   ChannelMarkedReadMsg          - optimistic mark-read echo:
-//                                   refresh sidebar read state.
-//   ChannelMembershipMsg          - membership fetch landed:
-//                                   push to the cache used by
-//                                   mention picker / DM resolution.
-//   ChannelJoinedMsg              - finder-driven join succeeded:
-//                                   add to sidebar + open it.
-//   ChannelJoinFailedMsg          - finder-driven join failed:
-//                                   log warning (toast TBD).
-//   channelSearchDebounceMsg      - finder typing paused: issue one
-//                                   channels/search for the query
-//                                   the user stopped on.
-//   RemoteChannelsFoundMsg        - that search answered: merge the
-//                                   non-joined matches into the
-//                                   finder, unless superseded.
+//	ChannelSelectedMsg            - user picked a channel: reset
+//	                                view state, mark visit,
+//	                                dispatch by cache freshness
+//	                                tier (fresh / verify-in-bg /
+//	                                spinner).
+//	MessagesLoadedMsg             - initial messages fetch landed:
+//	                                replace pane contents (nil =
+//	                                network failure, keep cache).
+//	OlderMessagesLoadedMsg        - history backfill landed:
+//	                                prepend (anchor-validated: dropped
+//	                                if the buffer was replaced
+//	                                mid-flight).
+//	NewerMessagesLoadedMsg        - forward bridge landed: splice a
+//	                                jump window back onto live
+//	                                (anchor-validated).
+//	ChannelMarkedRemoteMsg        - WS echo of a remote mark:
+//	                                apply locally.
+//	ChannelMarkedReadMsg          - optimistic mark-read echo:
+//	                                refresh sidebar read state.
+//	ChannelMembershipMsg          - membership fetch landed:
+//	                                push to the cache used by
+//	                                mention picker / DM resolution.
+//	ChannelJoinedMsg              - finder-driven join succeeded:
+//	                                add to sidebar + open it.
+//	ChannelJoinFailedMsg          - finder-driven join failed:
+//	                                log warning (toast TBD).
+//	channelSearchDebounceMsg      - finder typing paused: issue one
+//	                                channels/search for the query
+//	                                the user stopped on.
+//	RemoteChannelsFoundMsg        - that search answered: merge the
+//	                                non-joined matches into the
+//	                                finder, unless superseded.
 //
 // Free reducer (not controller-absorbed): these arms cooperate on
 // the sidebar, messagepane, statusbar, channelFinder, navHistory,
@@ -179,6 +182,43 @@ var reduceChannels reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 		}
 		a.messagepane.SetMessages(m.Messages)
 		a.messagepane.SelectByTS(m.TargetTS)
+		// The window may stop short of the channel head (Slack drops
+		// the newer half when it isn't contiguous with the target), so
+		// the buffer is no longer live: anchor it for the forward
+		// bridge. When the window did reach the head the first bridge
+		// fetch comes back empty and clears the anchor.
+		a.messagepane.SetNewerAnchor(a.messagepane.NewestTS())
+		return nil, true
+
+	case NewerMessagesLoadedMsg:
+		debuglog.Cache("NewerMessagesLoadedMsg: channel=%s active=%s anchor=%s count=%d reached_head=%v err=%v",
+			m.ChannelID, a.activeChannelID, m.AnchorTS, len(m.Messages), m.ReachedHead, m.Err)
+		// Clear the in-flight flag unconditionally (same reasoning as
+		// OlderMessagesLoadedMsg: a fetch that lands after the user
+		// navigated away must not disable the bridge forever).
+		delete(a.fetchingNewer, m.ChannelID)
+		if m.ChannelID == a.activeChannelID {
+			a.statusbar.SetSyncing(false)
+		}
+		if m.Err != nil {
+			// Leave the anchor in place so scrolling down retries.
+			return func() tea.Msg { return ToastMsg{Text: "Failed to load newer messages"} }, true
+		}
+		for _, mm := range a.modelsForChannel(m.ChannelID) {
+			if m.AnchorTS != mm.NewerAnchorTS() {
+				// This window is no longer the jump window the fetch
+				// was keyed to (buffer replaced mid-flight); splicing
+				// would corrupt its buffer. Siblings still want it.
+				continue
+			}
+			mm.MergeNewerBlock(m.AnchorTS, cloneMessageItems(m.Messages))
+			if !m.ReachedHead && len(m.Messages) > 0 {
+				// Budget ran out short of the head. Re-anchor on the
+				// block's newest message — not the buffer's, which may
+				// include WebSocket arrivals from beyond the gap.
+				mm.SetNewerAnchor(m.Messages[len(m.Messages)-1].TS)
+			}
+		}
 		return nil, true
 
 	case ChannelMarkedRemoteMsg:

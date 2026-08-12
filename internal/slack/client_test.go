@@ -2585,7 +2585,7 @@ func TestGetHistoryAround_FetchesBothDirections(t *testing.T) {
 	}
 }
 
-func TestGetHistoryAround_DropsIncompleteNewerPage(t *testing.T) {
+func TestGetHistoryAround_KeepsNewerPageWhenMoreExist(t *testing.T) {
 	mock := &mockSlackAPI{
 		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
 			if params.Latest != "" {
@@ -2594,14 +2594,13 @@ func TestGetHistoryAround_DropsIncompleteNewerPage(t *testing.T) {
 					{Msg: slack.Msg{Timestamp: "1700000004.000000"}},
 				}}, nil
 			}
-			// Oldest-anchored call: more than limit messages exist after
-			// ts, so this page holds the channel's most recent messages,
-			// NOT those adjacent to ts — including it would leave a gap.
+			// Oldest-anchored call: the page is adjacent to ts even
+			// when more messages exist beyond it.
 			return &slack.GetConversationHistoryResponse{
 				HasMore: true,
 				Messages: []slack.Message{
-					{Msg: slack.Msg{Timestamp: "1700000099.000000"}},
-					{Msg: slack.Msg{Timestamp: "1700000098.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000007.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000006.000000"}},
 				},
 			}, nil
 		},
@@ -2612,9 +2611,12 @@ func TestGetHistoryAround_DropsIncompleteNewerPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"1700000005.000000", "1700000004.000000"}
+	want := []string{
+		"1700000007.000000", "1700000006.000000",
+		"1700000005.000000", "1700000004.000000",
+	}
 	if len(got) != len(want) {
-		t.Fatalf("got %d messages, want %d (newer page should be dropped)", len(got), len(want))
+		t.Fatalf("got %d messages, want %d (both halves belong in the window)", len(got), len(want))
 	}
 	for i, ts := range want {
 		if got[i].Timestamp != ts {
@@ -3119,5 +3121,107 @@ func TestPostForm_BodyFieldOrderIsAlphabeticalThenEnvelope(t *testing.T) {
 			"If the lead is no longer alphabetical, postForm stopped using url.Values.Encode(): "+
 			"that is an improvement only if slack-go's bodies were fixed too, otherwise slk now "+
 			"emits two different body shapes. Update the residual-divergence table either way.", raw, want)
+	}
+}
+
+func TestGetNewerHistory_PagesForwardFromAnchor(t *testing.T) {
+	var calls []*slack.GetConversationHistoryParameters
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			calls = append(calls, params)
+			if params.Oldest == "1700000005.000000" {
+				// Page adjacent to the anchor, newest-first within it.
+				return &slack.GetConversationHistoryResponse{
+					HasMore: true,
+					Messages: []slack.Message{
+						{Msg: slack.Msg{Timestamp: "1700000007.000000"}},
+						{Msg: slack.Msg{Timestamp: "1700000006.000000"}},
+					},
+				}, nil
+			}
+			return &slack.GetConversationHistoryResponse{
+				Messages: []slack.Message{
+					{Msg: slack.Msg{Timestamp: "1700000009.000000"}},
+					{Msg: slack.Msg{Timestamp: "1700000008.000000"}},
+				},
+			}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, ok, err := c.GetNewerHistory(context.Background(), "C1", "1700000005.000000", 2, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected the walk to reach the head")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 history calls, got %d", len(calls))
+	}
+	if calls[0].Oldest != "1700000005.000000" || calls[0].Inclusive || calls[0].Limit != 2 || calls[0].ChannelID != "C1" {
+		t.Errorf("first call params: %+v", calls[0])
+	}
+	// Re-anchored on the previous page's newest message, and Latest
+	// stays unset: with both bounds the page would come from the
+	// latest end instead.
+	if calls[1].Oldest != "1700000007.000000" || calls[1].Latest != "" {
+		t.Errorf("second call params: %+v", calls[1])
+	}
+
+	// Newest-first overall, matching conversations.history's own order.
+	want := []string{"1700000009.000000", "1700000008.000000", "1700000007.000000", "1700000006.000000"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d messages, want %d", len(got), len(want))
+	}
+	for i, ts := range want {
+		if got[i].Timestamp != ts {
+			t.Errorf("got[%d].Timestamp = %s, want %s", i, got[i].Timestamp, ts)
+		}
+	}
+}
+
+// A budget-exhausted walk still returns what it fetched: the block is
+// contiguous with the anchor either way, so the caller can splice it in
+// and resume from its newest message.
+func TestGetNewerHistory_PageBudgetExhaustedReturnsPartialBlock(t *testing.T) {
+	seq := 0
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			seq++
+			return &slack.GetConversationHistoryResponse{
+				HasMore:  true,
+				Messages: []slack.Message{{Msg: slack.Msg{Timestamp: fmt.Sprintf("17000000%02d.000000", 5+seq)}}},
+			}, nil
+		},
+	}
+	c := &Client{api: mock}
+
+	got, ok, err := c.GetNewerHistory(context.Background(), "C1", "1700000005.000000", 1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("ok = true; want false — the head was never reached")
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d messages, want 3", len(got))
+	}
+	if got[0].Timestamp != "1700000008.000000" {
+		t.Errorf("got[0] = %s; want the newest fetched message first", got[0].Timestamp)
+	}
+}
+
+func TestGetNewerHistory_WrapsError(t *testing.T) {
+	sentinel := errors.New("channel_not_found")
+	mock := &mockSlackAPI{
+		getConversationHistoryFn: func(params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+			return nil, sentinel
+		},
+	}
+	c := &Client{api: mock}
+
+	if _, _, err := c.GetNewerHistory(context.Background(), "C1", "1700000005.000000", 2, 3); !errors.Is(err, sentinel) {
+		t.Errorf("error chain broken: %v does not wrap sentinel", err)
 	}
 }

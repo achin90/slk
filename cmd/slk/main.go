@@ -1526,6 +1526,21 @@ func run() error {
 					Messages:  msgItems,
 				}
 			},
+			FetchNewer: func(channelID ids.ChannelID, anchorTS ids.MessageTS) tea.Msg {
+				chIDStr := string(channelID)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				msgItems, reachedHead, err := fetchNewerMessages(wctx.Client, chIDStr, string(anchorTS), db, wctx.UserNames, tsFormat, router)
+				return ui.NewerMessagesLoadedMsg{
+					ChannelID:   chIDStr,
+					AnchorTS:    string(anchorTS),
+					Messages:    msgItems,
+					ReachedHead: reachedHead,
+					Err:         err,
+				}
+			},
 			FetchAround: func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {
 				chIDStr := string(channelID)
 				wctx := router.Active()
@@ -3084,6 +3099,30 @@ func fetchOlderMessages(client *slackclient.Client, channelID, latestTS string, 
 	debuglog.Cache("fetchOlderMessages: channel=%s latest_ts=%s result %s dur_ms=%d (older history backfill)",
 		channelID, latestTS, summarizeMessages(msgItems), time.Since(start).Milliseconds())
 	return msgItems
+}
+
+// fetchNewerMessages bridges a jump window forward: every message
+// posted after anchorTS, contiguous with it, ascending by TS. The bool
+// reports whether the block reached the channel head; when false the
+// caller resumes from the block's newest message.
+func fetchNewerMessages(client *slackclient.Client, channelID, anchorTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) ([]messages.MessageItem, bool, error) {
+	ctx := context.Background()
+	debuglog.Cache("fetchNewerMessages: channel=%s anchor_ts=%s entry", channelID, anchorTS)
+	start := time.Now()
+	// 5 pages x 200 bounds one keypress, not the whole gap: a jump far
+	// enough back to exhaust this resumes on the next scroll.
+	history, reachedHead, err := client.GetNewerHistory(ctx, channelID, anchorTS, 200, 5)
+	if err != nil {
+		debuglog.Cache("fetchNewerMessages: GetNewerHistory %s after %s: %v dur_ms=%d",
+			channelID, anchorTS, err, time.Since(start).Milliseconds())
+		return nil, false, err
+	}
+
+	msgItems := convertAndCacheHistory(client, channelID, history, db, userNames, tsFormat, router)
+
+	debuglog.Cache("fetchNewerMessages: channel=%s anchor_ts=%s result %s reached_head=%v dur_ms=%d (forward bridge)",
+		channelID, anchorTS, summarizeMessages(msgItems), reachedHead, time.Since(start).Milliseconds())
+	return msgItems, reachedHead, nil
 }
 
 // fetchMessagesAround fetches a history window centered on targetTS

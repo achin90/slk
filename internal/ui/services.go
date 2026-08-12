@@ -374,6 +374,12 @@ type ChannelService interface {
 	// Returns a tea.Msg (typically OlderMessagesLoadedMsg).
 	FetchOlder(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg
 
+	// FetchNewer loads everything posted after anchorTS, bridging a
+	// jump window forward to the channel head when the user scrolls
+	// past the bottom. Returns a tea.Msg (typically
+	// NewerMessagesLoadedMsg).
+	FetchNewer(channelID ids.ChannelID, anchorTS ids.MessageTS) tea.Msg
+
 	// FetchAround loads a history window centered on ts for
 	// jump-to-message navigation. Returns a tea.Msg (typically
 	// MessagesAroundLoadedMsg).
@@ -443,6 +449,7 @@ type ChannelService interface {
 type ChannelServiceFuncs struct {
 	Fetch            ChannelFetchFunc
 	FetchOlder       OlderMessagesFetchFunc
+	FetchNewer       NewerMessagesFetchFunc
 	FetchAround      func(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg
 	ReadCache        ChannelCacheReadFunc
 	SyncedAt         func(channelID ids.ChannelID) int64
@@ -481,6 +488,13 @@ func (c channelAdapter) FetchOlder(channelID ids.ChannelID, oldestTS ids.Message
 		return nil
 	}
 	return c.fns.FetchOlder(channelID, oldestTS)
+}
+
+func (c channelAdapter) FetchNewer(channelID ids.ChannelID, anchorTS ids.MessageTS) tea.Msg {
+	if c.fns.FetchNewer == nil {
+		return nil
+	}
+	return c.fns.FetchNewer(channelID, anchorTS)
 }
 
 func (c channelAdapter) FetchAround(channelID ids.ChannelID, ts ids.MessageTS) tea.Msg {

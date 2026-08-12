@@ -79,6 +79,25 @@ type (
 		AnchorTS string
 		Messages []messages.MessageItem
 	}
+	// NewerMessagesLoadedMsg delivers the forward backfill that bridges
+	// a jump window (see MessagesAroundLoadedMsg) to the channel's
+	// newest message. Messages run from just after AnchorTS all the way
+	// to the head, so applying the block makes the buffer live again.
+	NewerMessagesLoadedMsg struct {
+		ChannelID string
+		// AnchorTS is the jump window's newest ts, which the fetch was
+		// keyed to. The reducer drops the result for any window whose
+		// anchor has since changed (buffer replaced mid-flight).
+		AnchorTS string
+		Messages []messages.MessageItem // ascending by TS
+		// ReachedHead reports whether the block runs all the way to the
+		// channel's newest message. False means the fetch budget ran
+		// out first; the block is still contiguous with AnchorTS, so
+		// the reducer splices it in and re-anchors on its newest
+		// message to continue from there.
+		ReachedHead bool
+		Err         error
+	}
 	// MessagesAroundLoadedMsg delivers a history window fetched around
 	// TargetTS (jump-to-message navigation: search matches, search
 	// results, permalinks whose target is outside the loaded buffer).

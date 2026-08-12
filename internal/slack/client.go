@@ -677,16 +677,19 @@ func (c *Client) GetOlderHistory(ctx context.Context, channelID string, limit in
 
 // GetHistoryAround fetches a window of channel history centered on ts:
 // up to limit messages at-or-older than ts (inclusive), plus up to
-// limit messages newer than ts — but the newer half is included only
-// when it is complete. With only Oldest set, conversations.history
-// anchors at the channel head: it returns the most recent limit
-// messages in (ts, now], not the ones adjacent to ts. So when more
-// than limit messages were posted after the target (has_more=true),
-// the newer page is dropped entirely and the window ends at the
-// target; a contiguous window beats a gapped one. Returned
-// newest-first, matching Slack's conversations.history ordering. Used
-// by jump-to-message navigation (search results, permalinks) when the
-// target is outside the loaded buffer.
+// limit messages newer than it. Returned newest-first, matching
+// Slack's conversations.history ordering. Used by jump-to-message
+// navigation (search results, permalinks) when the target is outside
+// the loaded buffer.
+//
+// With Oldest set and Latest omitted, the page Slack returns is the
+// one adjacent to Oldest, so the newer half is contiguous with the
+// target even when has_more is set. The current conversations.history
+// reference is silent on which end of the range a page comes from; the
+// legacy channels.history docs said it outright ("If oldest is
+// provided but not latest then the messages returned are those closest
+// to oldest, allowing you to page forward through history if
+// desired"), and a live request confirms it still holds.
 func (c *Client) GetHistoryAround(ctx context.Context, channelID, ts string, limit int) ([]slack.Message, error) {
 	older, err := c.api.GetConversationHistory(&slack.GetConversationHistoryParameters{
 		ChannelID: channelID,
@@ -709,15 +712,53 @@ func (c *Client) GetHistoryAround(ctx context.Context, channelID, ts string, lim
 	if err != nil {
 		return nil, fmt.Errorf("getting history around %s (newer): %w", ts, err)
 	}
-	if newer.HasMore {
-		// The newer page is not adjacent to ts (see doc comment);
-		// including it would leave a silent hole after the target.
-		return older.Messages, nil
-	}
 	out := make([]slack.Message, 0, len(newer.Messages)+len(older.Messages))
 	out = append(out, newer.Messages...)
 	out = append(out, older.Messages...)
 	return out, nil
+}
+
+// GetNewerHistory pages forward from oldest (exclusive) toward the
+// channel's newest message, so a jump window (see GetHistoryAround) can
+// be extended until it reaches live. Returned newest-first, matching
+// Slack's conversations.history ordering.
+//
+// Each page re-anchors Oldest on the newest ts of the previous page
+// rather than following next_cursor, whose direction is documented
+// only for the backward walk. Pages are therefore contiguous with each
+// other and with oldest, which is what lets a partial result still be
+// spliced in: reachedHead reports whether the walk ran out of messages
+// or ran out of budget, and a caller that ran out of budget can resume
+// from the newest message it received.
+func (c *Client) GetNewerHistory(ctx context.Context, channelID, oldest string, pageSize, maxPages int) (msgs []slack.Message, reachedHead bool, err error) {
+	var all []slack.Message
+	anchor := oldest
+	for page := 0; page < maxPages; page++ {
+		resp, err := c.api.GetConversationHistory(&slack.GetConversationHistoryParameters{
+			ChannelID: channelID,
+			Oldest:    anchor,
+			Inclusive: false,
+			Limit:     pageSize,
+		})
+		if err != nil {
+			return nil, false, fmt.Errorf("getting newer history after %s: %w", anchor, err)
+		}
+		if len(resp.Messages) == 0 {
+			return all, true, nil
+		}
+		// Prepend: each page is newer than the last, and every page is
+		// itself newest-first, so the accumulated slice stays globally
+		// newest-first.
+		all = append(append([]slack.Message{}, resp.Messages...), all...)
+		if !resp.HasMore {
+			return all, true, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, false, fmt.Errorf("getting newer history after %s: %w", anchor, err)
+		}
+		anchor = resp.Messages[0].Timestamp
+	}
+	return all, false, nil
 }
 
 // SearchMessages runs a workspace-wide message search via Slack's

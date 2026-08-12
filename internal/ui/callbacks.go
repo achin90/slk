@@ -41,6 +41,10 @@ type ChannelCacheReadFunc func(channelID ids.ChannelID) []messages.MessageItem
 // OlderMessagesFetchFunc is called when the user scrolls to the top of a channel.
 type OlderMessagesFetchFunc func(channelID ids.ChannelID, oldestTS ids.MessageTS) tea.Msg
 
+// NewerMessagesFetchFunc is called when the user scrolls to the bottom of a
+// jump window; anchorTS is the window's newest message.
+type NewerMessagesFetchFunc func(channelID ids.ChannelID, anchorTS ids.MessageTS) tea.Msg
+
 // MessageSendFunc is called when the user sends a message. Returns a tea.Msg with the result.
 type MessageSendFunc func(channelID ids.ChannelID, text string) tea.Msg
 

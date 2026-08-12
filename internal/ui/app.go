@@ -234,6 +234,9 @@ type App struct {
 	// backfill block another channel's, and a fetch completing for
 	// a no-longer-viewed channel must still clear its own flag).
 	fetchingOlder map[string]bool
+	// fetchingNewer is fetchingOlder's twin for the forward bridge that
+	// walks a jump window back to live (see maybeFetchNewerHistory).
+	fetchingNewer map[string]bool
 
 	// Cached user-id -> display-name map (mirror of what SetUserNames
 	// last received). Used by openSelectedThreadCmd to populate the
@@ -532,6 +535,7 @@ func NewApp() *App {
 		threadsDirtyDebounce:  150 * time.Millisecond,
 		channelSearchDebounce: channelSearchDebounceDelay,
 		fetchingOlder:         map[string]bool{},
+		fetchingNewer:         map[string]bool{},
 		mouseWheelLines:       3,
 		userNames:             map[string]string{},
 		externalUsers:         map[string]bool{},
@@ -1311,7 +1315,9 @@ func (a *App) applyScrollMove(panel Panel, delta int) tea.Cmd {
 			for i := 0; i < delta; i++ {
 				a.messagepane.MoveDown()
 			}
-			return nil
+			// Selection reached the bottom of a jump window: bridge
+			// forward toward live (no-op for a live buffer).
+			return a.maybeFetchNewerHistory(a.messagepane.IsAtBottom())
 		}
 		for i := 0; i < -delta; i++ {
 			a.messagepane.MoveUp()
@@ -1376,6 +1382,7 @@ func (a *App) handleGoToBottom() tea.Cmd {
 			return a.openSelectedThreadCmd(false)
 		}
 		a.messagepane.GoToBottom()
+		return a.jumpToLive()
 	case PanelThread:
 		a.threadPanel.GoToBottom()
 	}
@@ -1464,6 +1471,7 @@ func (a *App) scrollFocusedPanel(delta int) tea.Cmd {
 				return a.maybeFetchOlderHistory(a.messagepane.ViewportAtTop())
 			}
 			a.messagepane.ScrollDown(n)
+			return a.maybeFetchNewerHistory(a.messagepane.ViewportAtBottom())
 		}
 	case PanelThread:
 		if delta < 0 {
@@ -1501,6 +1509,46 @@ func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
 			return channels.FetchOlder(chID, oldestTS)
 		},
 	)
+}
+
+// jumpToLive answers G on a jump window by refetching the channel
+// rather than bridging to it. Bridging pages through the gap, which is
+// right when the user is reading forward but absurd for a one-shot
+// jump: a target far enough back would take one keypress per page.
+// A plain fetch lands on the newest messages in one request, and
+// SetMessages clears the anchor. No-op on a live buffer.
+func (a *App) jumpToLive() tea.Cmd {
+	if a.messagepane.NewerAnchorTS() == "" {
+		return nil
+	}
+	channels := a.channels
+	chID := ids.ChannelID(a.activeChannelID)
+	name, _, _ := channels.Lookup(chID)
+	a.statusbar.SetSyncing(true)
+	return func() tea.Msg { return channels.Fetch(chID, name) }
+}
+
+// maybeFetchNewerHistory bridges a jump window forward to live when
+// `atBottom` is true, no bridge is already in flight, and the buffer is
+// actually a jump window (NewerAnchorTS set — a normally-loaded channel
+// already ends at the head and grows by WebSocket appends).
+//
+// Twin of maybeFetchOlderHistory, minus the spinner tick: the "Loading
+// older messages" hint is anchored to the top of the pane, so progress
+// is reported through the statusbar's syncing indicator instead.
+func (a *App) maybeFetchNewerHistory(atBottom bool) tea.Cmd {
+	anchor := a.messagepane.NewerAnchorTS()
+	if !atBottom || anchor == "" || a.fetchingNewer[a.activeChannelID] {
+		return nil
+	}
+	a.fetchingNewer[a.activeChannelID] = true
+	a.statusbar.SetSyncing(true)
+	chID := ids.ChannelID(a.activeChannelID)
+	channels := a.channels
+	anchorTS := ids.MessageTS(anchor)
+	return func() tea.Msg {
+		return channels.FetchNewer(chID, anchorTS)
+	}
 }
 
 // openQuitConfirm raises the centered "Quit slk?" overlay. Called from

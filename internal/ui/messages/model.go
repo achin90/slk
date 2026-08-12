@@ -273,6 +273,15 @@ type Model struct {
 	// search; non-empty enables highlight rendering. nil = no search.
 	searchTerms []string
 
+	// newerAnchorTS marks this buffer as a jump window (set when
+	// MessagesAroundLoadedMsg replaces the buffer) rather than a live
+	// tail of the channel: history newer than this ts may be missing.
+	// It stays fixed at the window's newest ts even as WS traffic glues
+	// messages onto the end, so the forward backfill always asks for
+	// the block that fills the hole. Cleared by SetMessages (a full
+	// load is live by construction) and once the backfill lands.
+	newerAnchorTS string
+
 	// Render cache -- invalidated when messages or width change.
 	// Each entry holds pre-bordered variants so selection movement does not
 	// re-invoke lipgloss per keypress.
@@ -703,6 +712,7 @@ func (m *Model) SetMessages(msgs []MessageItem) {
 	}
 	m.messages = msgs
 	m.ClearSelection()
+	m.newerAnchorTS = ""
 	m.cache = nil // invalidate cache
 	// Force the next View() to re-snap yOffset to the new selection -- without
 	// this, switching to a channel that happens to have the same selected
@@ -1012,6 +1022,19 @@ func (m *Model) AtTop() bool {
 // selection (selection-based backfill goes through AtTop()).
 func (m *Model) ViewportAtTop() bool {
 	return m.yOffset == 0 && len(m.messages) > 0
+}
+
+// ViewportAtBottom reports whether the viewport is scrolled to the very
+// bottom of the message stream. Twin of ViewportAtTop: used by the app
+// layer to trigger the forward backfill on a wheel-down / PageDown
+// gesture that scrolls the viewport without moving selection
+// (selection-based triggering goes through IsAtBottom()). Reports false
+// until the first render has measured the content.
+func (m *Model) ViewportAtBottom() bool {
+	if len(m.messages) == 0 || m.totalLines == 0 || m.lastViewHeight == 0 {
+		return false
+	}
+	return m.yOffset+m.lastViewHeight >= m.totalLines
 }
 
 // YOffset returns the current viewport scroll offset (first visible line
@@ -1551,6 +1574,84 @@ func (m *Model) OldestTS() string {
 		return ""
 	}
 	return m.messages[0].TS
+}
+
+func (m *Model) NewestTS() string {
+	if len(m.messages) == 0 {
+		return ""
+	}
+	return m.messages[len(m.messages)-1].TS
+}
+
+// SetNewerAnchor marks the buffer as a jump window whose newest message
+// is ts; "" marks it live. See the newerAnchorTS field doc.
+func (m *Model) SetNewerAnchor(ts string) {
+	if m.newerAnchorTS == ts {
+		return
+	}
+	m.newerAnchorTS = ts
+	m.dirty()
+}
+
+// NewerAnchorTS returns the jump-window anchor, or "" when the buffer
+// is live (reaches the channel's newest message).
+func (m *Model) NewerAnchorTS() string { return m.newerAnchorTS }
+
+// MergeNewerBlock splices a forward-backfill block onto a jump window.
+// The block starts immediately after anchorTS and runs to the channel
+// head, so it also covers any messages that arrived over the WebSocket
+// while the window was stale — those were appended straight onto the
+// end of the buffer with a hole in front of them, so they are re-sorted
+// into place here rather than left dangling. Selection follows its
+// message. Clears the anchor: the buffer is live again.
+func (m *Model) MergeNewerBlock(anchorTS string, msgs []MessageItem) {
+	m.newerAnchorTS = ""
+	if len(msgs) == 0 {
+		m.dirty()
+		return
+	}
+	selectedTS := ""
+	if m.selected >= 0 && m.selected < len(m.messages) {
+		selectedTS = m.messages[m.selected].TS
+	}
+	inBlock := make(map[string]struct{}, len(msgs))
+	for _, it := range msgs {
+		inBlock[it.TS] = struct{}{}
+	}
+	merged := make([]MessageItem, 0, len(m.messages)+len(msgs))
+	var strays []MessageItem
+	for _, it := range m.messages {
+		if it.TS <= anchorTS {
+			merged = append(merged, it)
+			continue
+		}
+		if _, dup := inBlock[it.TS]; !dup {
+			strays = append(strays, it)
+		}
+	}
+	head := len(merged)
+	merged = append(merged, msgs...)
+	merged = append(merged, strays...)
+	tail := merged[head:]
+	slices.SortStableFunc(tail, func(a, b MessageItem) int {
+		return strings.Compare(a.TS, b.TS)
+	})
+	m.messages = merged
+
+	m.selected = len(m.messages) - 1
+	if selectedTS != "" {
+		for i := range m.messages {
+			if m.messages[i].TS == selectedTS {
+				m.selected = i
+				break
+			}
+		}
+	}
+	if m.selected < 0 {
+		m.selected = 0
+	}
+	m.cache = nil
+	m.dirty()
 }
 
 // cacheStyles bundles the lipgloss styles and pre-rendered strings that
