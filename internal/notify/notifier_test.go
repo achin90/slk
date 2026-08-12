@@ -97,6 +97,33 @@ func TestShouldNotify_SpecialMentions(t *testing.T) {
 	}
 }
 
+// Some clients send broadcasts with an embedded label
+// (<!here|@here>) rather than bare. Both forms must count, otherwise
+// the message raises neither the mention badge nor the sidebar's red
+// mention dot.
+func TestShouldNotify_LabeledBroadcasts(t *testing.T) {
+	ctx := NotifyContext{
+		CurrentUserID:   "U1",
+		ActiveChannelID: "C_OTHER",
+		IsActiveWS:      true,
+		OnMention:       true,
+	}
+	for _, text := range []string{
+		"hey <!here|@here> check this",
+		"hey <!channel|@channel> check this",
+		"hey <!everyone|@everyone> check this",
+		"hey <!here|here> check this",
+	} {
+		if !ShouldNotify(ctx, "C1", "U2", text, "channel") {
+			t.Errorf("should notify for labeled broadcast %q", text)
+		}
+	}
+	// Not a broadcast: a channel link must not masquerade as one.
+	if ShouldNotify(ctx, "C1", "U2", "see <#C9|general>", "channel") {
+		t.Error("channel link should not count as a broadcast mention")
+	}
+}
+
 func TestShouldNotify_Keyword(t *testing.T) {
 	ctx := NotifyContext{
 		CurrentUserID:   "U1",

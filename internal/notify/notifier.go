@@ -93,9 +93,7 @@ func ShouldNotify(ctx NotifyContext, channelID, userID, text, channelType string
 
 	// Check mention trigger
 	if ctx.OnMention && (strings.Contains(text, "<@"+ctx.CurrentUserID+">") ||
-		strings.Contains(text, "<!here>") ||
-		strings.Contains(text, "<!channel>") ||
-		strings.Contains(text, "<!everyone>") ||
+		broadcastRe.MatchString(text) ||
 		subteamMentionsSelf(text, ctx.SelfSubteams)) {
 		return true
 	}
@@ -120,7 +118,11 @@ var (
 	// forms are normalized to "@label"; bare forms resolve through the
 	// caller's workspace-scoped usergroup map.
 	subteamMentionRe = regexp.MustCompile(`<!subteam\^([A-Z0-9]+)(?:\|([^>]+))?>`)
-	broadcastRe      = regexp.MustCompile(`<!(here|channel|everyone)>`)
+	// Broadcasts arrive either bare (<!here>) or with an embedded label
+	// (<!here|@here>) depending on which client sent them; both forms
+	// must count as a mention and both must strip to "@here". Mirrors
+	// specialMentionRe in internal/ui/messages/flatten.go.
+	broadcastRe = regexp.MustCompile(`<!(here|channel|everyone)(?:\|[^>]*)?>`)
 	// Match both http(s) URLs and mailto: addresses; Slack
 	// auto-linkifies typed emails into <mailto:X|X>. Bare-link
 	// substitution keeps the URL as-is for http(s) but strips the
