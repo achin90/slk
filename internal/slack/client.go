@@ -54,7 +54,12 @@ type SlackAPI interface {
 	EndSnoozeContext(ctx context.Context) (*slack.DNDStatus, error)
 	EndDNDContext(ctx context.Context) error
 	GetDNDInfoContext(ctx context.Context, user *string, options ...slack.ParamOption) (*slack.DNDStatus, error)
-	UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
+	// The three steps of file.upload.v2, called individually rather than
+	// via UploadFileContext so a batch of files can be shared in ONE
+	// completeUploadExternal call (= one Slack message). See UploadFiles.
+	GetUploadURLExternalContext(ctx context.Context, params slack.GetUploadURLExternalParameters) (*slack.GetUploadURLExternalResponse, error)
+	UploadToURL(ctx context.Context, params slack.UploadToURLParameters) error
+	CompleteUploadExternalContext(ctx context.Context, params slack.CompleteUploadExternalParameters) (*slack.CompleteUploadExternalResponse, error)
 	OpenConversationContext(ctx context.Context, params *slack.OpenConversationParameters) (*slack.Channel, bool, bool, error)
 }
 
@@ -945,44 +950,88 @@ func (c *Client) OpenConversation(ctx context.Context, userIDs []string) (string
 	return ch.ID, alreadyOpen, nil
 }
 
-// UploadFile uploads a single file to a channel (and optional thread)
-// using Slack's V2 external-upload flow. The slack-go library's
-// UploadFileContext (named for the underlying file.upload.v2 API)
-// handles the three internal steps:
-// getUploadURLExternal -> PUT -> completeUploadExternal.
+// FileUpload is one file in an UploadFiles batch.
 //
-// caption, when non-empty, is attached as the file's initial_comment.
-// For multi-file batches the caller should set caption on the LAST
-// file only (Slack groups files completed in one share into one
-// message; sequential single-file uploads can't be grouped).
-//
-// size is int64 (matching os.FileInfo.Size()) and is narrowed to int
+// Size is int64 (matching os.FileInfo.Size()) and is narrowed to int
 // for slack-go. Callers must enforce a reasonable upper bound; this
 // wrapper does not.
-func (c *Client) UploadFile(
+type FileUpload struct {
+	Filename string
+	Reader   io.Reader
+	Size     int64
+}
+
+// maxFilesPerShare is Slack's cap on the files array of
+// files.completeUploadExternal. Batches larger than this must be shared
+// in several calls, which unavoidably produces one message per call.
+const maxFilesPerShare = 10
+
+// UploadFiles uploads files to a channel (and optional thread) using
+// Slack's V2 external-upload flow, sharing the whole batch as a SINGLE
+// message. The three steps are driven by hand rather than through
+// slack-go's UploadFileContext because that helper completes one file
+// per call, and Slack turns every completeUploadExternal call into its
+// own message — pasting three images produced three posts.
+//
+// Steps: getUploadURLExternal + PUT per file, then ONE
+// completeUploadExternal listing every file ID.
+//
+// caption, when non-empty, becomes the message's initial_comment.
+//
+// Returns one FileSummary per input file, in the order given, so callers
+// can correlate uploaded file IDs with their local bytes.
+func (c *Client) UploadFiles(
 	ctx context.Context,
-	channelID, threadTS, filename string,
-	r io.Reader,
-	size int64,
-	caption string,
-) (*slack.FileSummary, error) {
-	params := slack.UploadFileParameters{
-		Filename: filename,
-		Reader:   r,
-		FileSize: int(size),
-		Channel:  channelID,
+	channelID, threadTS, caption string,
+	files []FileUpload,
+	onUploaded func(done int),
+) ([]slack.FileSummary, error) {
+	if len(files) == 0 {
+		return nil, nil
 	}
-	if threadTS != "" {
-		params.ThreadTimestamp = threadTS
+
+	uploaded := make([]slack.FileSummary, 0, len(files))
+	for i, f := range files {
+		u, err := c.api.GetUploadURLExternalContext(ctx, slack.GetUploadURLExternalParameters{
+			FileName: f.Filename,
+			FileSize: int(f.Size),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reserving upload slot for %q: %w", f.Filename, err)
+		}
+		if err := c.api.UploadToURL(ctx, slack.UploadToURLParameters{
+			UploadURL: u.UploadURL,
+			Reader:    f.Reader,
+			Filename:  f.Filename,
+		}); err != nil {
+			return nil, fmt.Errorf("uploading file %q: %w", f.Filename, err)
+		}
+		uploaded = append(uploaded, slack.FileSummary{ID: u.FileID, Title: f.Filename})
+		if onUploaded != nil {
+			onUploaded(i + 1)
+		}
 	}
-	if caption != "" {
-		params.InitialComment = caption
+
+	// One share per chunk of at most maxFilesPerShare files. The common
+	// case is a single chunk, hence a single message; the caption rides
+	// on the last chunk so it reads as a trailing comment.
+	for start := 0; start < len(uploaded); start += maxFilesPerShare {
+		end := min(start+maxFilesPerShare, len(uploaded))
+		params := slack.CompleteUploadExternalParameters{
+			Files:   uploaded[start:end],
+			Channel: channelID,
+		}
+		if threadTS != "" {
+			params.ThreadTimestamp = threadTS
+		}
+		if end == len(uploaded) {
+			params.InitialComment = caption
+		}
+		if _, err := c.api.CompleteUploadExternalContext(ctx, params); err != nil {
+			return nil, fmt.Errorf("sharing %d uploaded file(s): %w", end-start, err)
+		}
 	}
-	f, err := c.api.UploadFileContext(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("uploading file %q: %w", filename, err)
-	}
-	return f, nil
+	return uploaded, nil
 }
 
 // UnreadInfo holds the unread state for a single channel.

@@ -1716,9 +1716,13 @@ func run() error {
 				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
 
-				for i, att := range attachments {
-					p.Send(ui.UploadProgressMsg{Done: i, Total: len(attachments)})
+				p.Send(ui.UploadProgressMsg{Done: 0, Total: len(attachments)})
 
+				// Hand the whole batch to UploadFiles so Slack shares it
+				// as ONE message; uploading (and completing) one file at
+				// a time posts each file separately.
+				uploads := make([]slackclient.FileUpload, 0, len(attachments))
+				for _, att := range attachments {
 					var reader io.Reader
 					if att.Bytes != nil {
 						reader = bytes.NewReader(att.Bytes)
@@ -1730,39 +1734,46 @@ func run() error {
 						defer f.Close()
 						reader = f
 					}
+					uploads = append(uploads, slackclient.FileUpload{
+						Filename: att.Filename,
+						Reader:   reader,
+						Size:     att.Size,
+					})
+				}
 
-					currentCaption := ""
-					if i == len(attachments)-1 {
-						currentCaption = caption
+				summaries, err := client.UploadFiles(ctx, channelID, threadTS, caption, uploads,
+					func(done int) {
+						p.Send(ui.UploadProgressMsg{Done: done, Total: len(attachments)})
+					})
+				if err != nil {
+					return ui.UploadResultMsg{Err: err}
+				}
+
+				// Pre-seed the image cache with the local bytes so the
+				// renderer uses the full-resolution image instead of
+				// fetching small thumbnails from Slack. The cache key
+				// must match what RenderBlock will generate:
+				// fileID + "-" + max(origW, origH).
+				for i, att := range attachments {
+					if att.Bytes == nil || i >= len(summaries) || summaries[i].ID == "" {
+						continue
 					}
-
-					fileSummary, err := client.UploadFile(ctx, channelID, threadTS, att.Filename, reader, att.Size, currentCaption)
+					img, _, err := image.Decode(bytes.NewReader(att.Bytes))
 					if err != nil {
-						return ui.UploadResultMsg{Err: fmt.Errorf("uploading %s (%d/%d): %w", att.Filename, i+1, len(attachments), err)}
+						continue
 					}
-
-					// Pre-seed the image cache with the local bytes so
-					// the renderer uses the full-resolution image
-					// instead of fetching small thumbnails from Slack.
-					// The cache key must match what RenderBlock will
-					// generate: fileID + "-" + max(origW, origH).
-					if att.Bytes != nil && fileSummary != nil && fileSummary.ID != "" {
-						if img, _, err := image.Decode(bytes.NewReader(att.Bytes)); err == nil {
-							bounds := img.Bounds()
-							origW, origH := bounds.Dx(), bounds.Dy()
-							maxDim := origW
-							if origH > maxDim {
-								maxDim = origH
-							}
-							cacheKey := fileSummary.ID + "-" + strconv.Itoa(maxDim)
-							imageFetcher.SeedCache(cacheKey, att.Bytes)
-							p.Send(ui.LocalImageSeededMsg{
-								FileID: fileSummary.ID,
-								OrigW:  origW,
-								OrigH:  origH,
-							})
-						}
+					bounds := img.Bounds()
+					origW, origH := bounds.Dx(), bounds.Dy()
+					maxDim := origW
+					if origH > maxDim {
+						maxDim = origH
 					}
+					imageFetcher.SeedCache(summaries[i].ID+"-"+strconv.Itoa(maxDim), att.Bytes)
+					p.Send(ui.LocalImageSeededMsg{
+						FileID: summaries[i].ID,
+						OrigW:  origW,
+						OrigH:  origH,
+					})
 				}
 				p.Send(ui.UploadProgressMsg{Done: len(attachments), Total: len(attachments)})
 				return ui.UploadResultMsg{Err: nil}
