@@ -680,7 +680,8 @@ func (m *Model) renderCard(s cache.ThreadSummary, width int, selected bool) []st
 	glyph := channelGlyph(s.ChannelType)
 	author := m.resolveUser(s.ParentUserID)
 	relTime := formatRelTime(s.ParentTS)
-	header := glyph + channelNameStyle().Render(s.ChannelName) + "  " + mutedStyle().Render("·") + "  " + author + "  " + mutedStyle().Render("· "+relTime)
+	authorStyled := lipgloss.NewStyle().Foreground(styles.TextPrimary).Render(author)
+	header := glyph + channelNameStyle().Render(s.ChannelName) + "  " + mutedStyle().Render("·") + "  " + authorStyled + "  " + mutedStyle().Render("· "+relTime)
 	if s.Unread {
 		header += "  " + unreadDotStyle().Render("●")
 	}
@@ -721,11 +722,12 @@ func (m *Model) renderCard(s cache.ThreadSummary, width int, selected bool) []st
 	// the tint to the right edge — same per-variant fill pattern used
 	// in internal/ui/messages/model.go).
 	borderStyle := borderInvisStyle()
-	fill := borderFillStyle().Width(contentWidth)
+	fill := borderFillStyle().Foreground(styles.TextPrimary).Width(contentWidth)
 	if selected {
 		borderStyle = borderSelectStyle(m.focused)
 		fill = lipgloss.NewStyle().
 			Background(styles.SelectionTintColor(m.focused)).
+			Foreground(styles.TextPrimary).
 			Width(contentWidth)
 	}
 

@@ -262,8 +262,13 @@ func ReapplyBgAfterResets(text string, style string) string {
 	if style == "" {
 		return text
 	}
-	// lipgloss v2 uses \x1b[m (no 0), but handle both forms
+	// lipgloss v2 uses \x1b[m (no 0), but handle both forms.
 	text = strings.ReplaceAll(text, "\x1b[m", "\x1b[m"+style)
+	// Kitty unicode-placeholder emoji encode the image ID in the
+	// foreground color and then emit \x1b[39m (default fg) to restore
+	// it. That wipes the theme fg on light terminals. Re-paint after
+	// the fg-only reset as well.
+	text = strings.ReplaceAll(text, "\x1b[39m", "\x1b[39m"+style)
 	return text
 }
 

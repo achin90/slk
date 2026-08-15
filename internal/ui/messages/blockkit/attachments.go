@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	imgpkg "github.com/gammons/slk/internal/image"
+	"github.com/gammons/slk/internal/ui/styles"
 )
 
 // stripeGlyph is the leading character on every line inside the
@@ -63,7 +64,7 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 		if perf != nil {
 			t0 = time.Now()
 		}
-		out.Lines = append(out.Lines, renderTextLines(a.Pretext, ctx, width)...)
+		out.Lines = append(out.Lines, applyTextPrimary(renderTextLines(a.Pretext, ctx, width))...)
 		if perf != nil {
 			perf.textTotal += time.Since(t0)
 		}
@@ -94,7 +95,7 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 		if a.TitleLink != "" {
 			title = "\x1b]8;;" + a.TitleLink + "\x1b\\" + title + "\x1b]8;;\x1b\\"
 		}
-		titleStyle := lipgloss.NewStyle().Bold(true)
+		titleStyle := lipgloss.NewStyle().Bold(true).Foreground(styles.TextPrimary)
 		if lipgloss.Width(title) > contentW {
 			title = truncateToWidth(title, contentW)
 		}
@@ -108,7 +109,7 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 		if perf != nil {
 			t0 = time.Now()
 		}
-		body = append(body, renderTextLines(a.Text, ctx, contentW)...)
+		body = append(body, applyTextPrimary(renderTextLines(a.Text, ctx, contentW))...)
 		if perf != nil {
 			perf.textTotal += time.Since(t0)
 		}
@@ -142,7 +143,7 @@ func appendLegacyAttachment(out *RenderResult, a LegacyAttachment, ctx Context, 
 		}
 		nested = Render(a.Blocks, ctx, contentW)
 		nestedRowStartInBody = len(body)
-		body = append(body, nested.Lines...)
+		body = append(body, applyTextPrimary(nested.Lines)...)
 		if nested.Interactive {
 			out.Interactive = true
 		}
@@ -300,7 +301,18 @@ func renderLegacyField(f LegacyField, ctx Context, width int) []string {
 		out = append(out, title)
 	}
 	if f.Value != "" {
-		out = append(out, renderTextLines(f.Value, ctx, width)...)
+		out = append(out, applyTextPrimary(renderTextLines(f.Value, ctx, width))...)
 	}
 	return out
+}
+
+// applyTextPrimary wraps each line with an explicit TextPrimary
+// foreground so text is readable on light themes where the terminal
+// default foreground may not contrast with the app background.
+func applyTextPrimary(lines []string) []string {
+	s := lipgloss.NewStyle().Foreground(styles.TextPrimary)
+	for i, l := range lines {
+		lines[i] = s.Render(l)
+	}
+	return lines
 }
