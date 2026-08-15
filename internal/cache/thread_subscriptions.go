@@ -138,10 +138,12 @@ ON CONFLICT(workspace_id, channel_id, thread_ts) DO UPDATE SET
     active       = 1,
     updated_at   = excluded.updated_at
 `
+	uniqueKeys := make(map[key]struct{}, len(fresh))
 	for _, s := range fresh {
 		if _, err := tx.Exec(upsertQ, workspaceID, s.ChannelID, s.ThreadTS, s.LastRead, s.LatestReply, now); err != nil {
 			return fmt.Errorf("upserting fresh subscription (%s/%s): %w", s.ChannelID, s.ThreadTS, err)
 		}
+		uniqueKeys[key{s.ChannelID, s.ThreadTS}] = struct{}{}
 	}
 
 	// 2. Find currently-active rows that aren't in the fresh list and

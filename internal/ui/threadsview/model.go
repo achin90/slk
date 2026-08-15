@@ -101,6 +101,11 @@ type Model struct {
 	snappedSelection int
 	hasSnapped       bool
 
+	// lastBodyHeight is the body-area height (excluding any banner line)
+	// from the most recent View() call. Used by clampSelectionToViewport
+	// to know which cards are visible after a scroll.
+	lastBodyHeight int
+
 	// subscriptionsAvailable tracks whether Slack's
 	// subscriptions.thread.list call succeeded most recently. When
 	// false, View renders a one-line "Threads list unavailable"
@@ -317,11 +322,10 @@ func (m *Model) GoToBottom() {
 	}
 }
 
-// ScrollUp moves the viewport up n lines without changing the selection.
-// Marks the current selection as already-snapped so the next View() leaves
-// yOffset alone -- otherwise the snap would yank the viewport back to keep
-// the (unchanged) selection visible, undoing the scroll. The next selection
-// move (j/k/click) will re-snap naturally because snappedSelection != selected.
+// ScrollUp moves the viewport up n lines. If the scroll pushes the
+// selected card out of view, the selection follows to the last card
+// still visible — matching the messages panel's cursor-follows-scroll
+// behavior so j/k afterward starts from the visible area.
 func (m *Model) ScrollUp(n int) {
 	if n <= 0 {
 		return
@@ -330,19 +334,21 @@ func (m *Model) ScrollUp(n int) {
 	if m.yOffset < 0 {
 		m.yOffset = 0
 	}
+	m.clampSelectionToViewport()
 	m.snappedSelection = m.selected
 	m.hasSnapped = true
 	m.dirty()
 }
 
-// ScrollDown moves the viewport down n lines without changing the
-// selection. View() clamps yOffset against the actual content height.
-// Marks the current selection as already-snapped (see ScrollUp).
+// ScrollDown moves the viewport down n lines. If the scroll pushes the
+// selected card out of view, the selection follows to the first card
+// still visible. View() clamps yOffset against the actual content height.
 func (m *Model) ScrollDown(n int) {
 	if n <= 0 {
 		return
 	}
 	m.yOffset += n
+	m.clampSelectionToViewport()
 	m.snappedSelection = m.selected
 	m.hasSnapped = true
 	m.dirty()
@@ -491,6 +497,34 @@ func (m *Model) clampSelection() {
 	}
 }
 
+// clampSelectionToViewport adjusts m.selected so the selected card is
+// within the visible viewport after a scroll. If the selected card
+// scrolled off the top, selection moves to the first visible card; if
+// it scrolled off the bottom, selection moves to the last visible card.
+// Uses lastBodyHeight from the most recent View() call.
+func (m *Model) clampSelectionToViewport() {
+	if len(m.summaries) == 0 || m.lastBodyHeight <= 0 {
+		return
+	}
+	selStart := m.selected * cardStride
+	selEnd := selStart + cardContentLines
+	visibleEnd := m.yOffset + m.lastBodyHeight
+
+	if selEnd <= m.yOffset {
+		// Selected card is above the viewport — pick the first visible card.
+		m.selected = m.yOffset / cardStride
+		m.clampSelection()
+	} else if selStart >= visibleEnd {
+		// Selected card is below the viewport — pick the last visible card.
+		lastVisible := (visibleEnd - 1) / cardStride
+		if lastVisible < 0 {
+			lastVisible = 0
+		}
+		m.selected = lastVisible
+		m.clampSelection()
+	}
+}
+
 // View renders the threads list to a string of `height` lines, each
 // `width` columns wide. Argument order matches sidebar.View and
 // thread.View (height first).
@@ -529,6 +563,8 @@ func (m *Model) View(height, width int) string {
 			bodyHeight = 0
 		}
 	}
+
+	m.lastBodyHeight = bodyHeight
 
 	// Body: the empty-state placeholder or the rendered rows. Mirror
 	// the existing logic but render into bodyHeight, then prepend the

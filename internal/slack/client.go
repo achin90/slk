@@ -1848,6 +1848,8 @@ const listThreadSubscriptionsHardCap = 1000
 // (the reconnect backfill phase) treats any error as "subscriptions
 // unavailable" and surfaces the UI banner.
 func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscriptionView, error) {
+	type key struct{ ch, ts string }
+	seen := make(map[key]struct{})
 	var all []ThreadSubscriptionView
 	currentTS := ""
 	for {
@@ -1862,6 +1864,8 @@ func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscript
 		if !resp.OK {
 			return nil, fmt.Errorf("subscriptions.thread.getView: %s (body=%s)", resp.Error, truncateForLog(body))
 		}
+		newThisPage := 0
+		oldestReplyTS := ""
 		for _, item := range resp.Threads {
 			var sm slackThreadRootMsg
 			if err := json.Unmarshal(item.RootMsg, &sm); err != nil {
@@ -1872,6 +1876,12 @@ func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscript
 			if !sm.Subscribed {
 				continue
 			}
+			k := key{sm.Channel, sm.ThreadTS}
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			newThisPage++
 			var raw slack.Message
 			if err := json.Unmarshal(item.RootMsg, &raw); err != nil {
 				// Couldn't decode the rich message; skip so we don't
@@ -1880,6 +1890,17 @@ func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscript
 				// slack.Message so the caller can still record the row.
 				debuglog.Backfill("ListThreadSubscriptions: root_msg slack.Message decode err=%v; subscription kept without RootMessage", err)
 				raw = slack.Message{}
+			}
+			// Track the oldest latest_reply on this page for cursor.
+			// Threads are sorted newest-first by latest activity;
+			// the oldest item's latest_reply is the cursor for the
+			// next (older) page.
+			lr := raw.LatestReply
+			if lr == "" {
+				lr = sm.ThreadTS
+			}
+			if oldestReplyTS == "" || lr < oldestReplyTS {
+				oldestReplyTS = lr
 			}
 			all = append(all, ThreadSubscriptionView{
 				Subscription: ThreadSubscription{
@@ -1895,16 +1916,23 @@ func (c *Client) ListThreadSubscriptions(ctx context.Context) ([]ThreadSubscript
 				return all, nil
 			}
 		}
-		if !resp.HasMore || resp.MaxTS == "" {
+		// Stop if the page yielded no new items — the server is
+		// looping over the same set.
+		if newThisPage == 0 {
+			debuglog.Backfill("ListThreadSubscriptions: page returned 0 new items, stopping (total unique=%d)", len(all))
 			break
 		}
-		// Note: unlike GetChannelSections we do NOT bail when the
-		// server echoes back the same MaxTS — the
-		// listThreadSubscriptionsHardCap above is the runaway-protection
-		// mechanism for this endpoint, and the hard-cap test exercises
-		// exactly that case (server returns has_more=true with an
-		// unchanging max_ts forever).
-		currentTS = resp.MaxTS
+		if !resp.HasMore {
+			break
+		}
+		// Use the oldest thread's latest_reply as the pagination
+		// cursor. The response's max_ts is a window upper bound
+		// (≈ now) and never advances; the desktop client paginates
+		// backwards by passing the oldest visible thread's timestamp.
+		if oldestReplyTS == "" {
+			break
+		}
+		currentTS = oldestReplyTS
 	}
 	return all, nil
 }
