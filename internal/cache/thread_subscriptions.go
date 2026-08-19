@@ -55,6 +55,31 @@ ON CONFLICT(workspace_id, channel_id, thread_ts) DO UPDATE SET
 	return nil
 }
 
+// MarkThreadRead advances last_read and caps latest_reply so the thread
+// no longer computes as unread. latest_reply is an authoritative
+// watermark from subscriptions.thread.getView; when the user has read
+// up to (or past) that watermark, we clamp it to last_read so the
+// effLatest > lastRead check in ListSubscribedThreads produces false.
+// No-op if the row doesn't exist (same as UpdateThreadLastRead).
+func (db *DB) MarkThreadRead(workspaceID, channelID, threadTS, lastRead string) error {
+	if workspaceID == "" || channelID == "" || threadTS == "" {
+		return fmt.Errorf("MarkThreadRead: workspace/channel/thread_ts required")
+	}
+	const q = `
+UPDATE thread_subscriptions
+SET last_read    = ?,
+    latest_reply = CASE WHEN latest_reply <= ? THEN latest_reply ELSE ? END,
+    updated_at   = ?
+WHERE workspace_id = ? AND channel_id = ? AND thread_ts = ?
+`
+	_, err := db.conn.Exec(q, lastRead, lastRead, lastRead, time.Now().Unix(),
+		workspaceID, channelID, threadTS)
+	if err != nil {
+		return fmt.Errorf("marking thread read: %w", err)
+	}
+	return nil
+}
+
 // DeleteThreadSubscription removes a thread_subscriptions row outright
 // (not a tombstone). Used by tests; production callers prefer
 // UpsertThreadSubscription with active=false to preserve LastRead.

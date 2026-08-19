@@ -1806,6 +1806,15 @@ func run() error {
 				if wctx == nil {
 					return
 				}
+				// Update the local DB immediately so the next
+				// ListSubscribedThreads sees the thread as read,
+				// regardless of whether the WS echo arrives.
+				// MarkThreadRead also caps latest_reply so the
+				// authoritative watermark can't keep re-flagging
+				// the thread as unread.
+				if err := db.MarkThreadRead(wctx.TeamID, chIDStr, threadTSStr, tsStr); err != nil {
+					log.Printf("Warning: MarkThreadRead(%s, %s): %v", chIDStr, threadTSStr, err)
+				}
 				client := wctx.Client
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
