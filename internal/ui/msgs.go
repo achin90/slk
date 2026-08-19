@@ -146,6 +146,29 @@ type (
 	ThreadRepliesLoadedMsg struct {
 		ThreadTS string
 		Replies  []messages.MessageItem
+		// HasMoreOlder reports whether Slack has replies older than
+		// the oldest one in Replies. Threads load their newest page
+		// first (slackclient.ThreadPageLimit), so this drives whether
+		// scrolling to the top backfills.
+		HasMoreOlder bool
+	}
+	// OlderThreadRepliesLoadedMsg delivers one backward page of thread
+	// replies, dispatched by the scroll-to-top backfill. Mirrors
+	// OlderMessagesLoadedMsg, including its anchor-validation contract.
+	OlderThreadRepliesLoadedMsg struct {
+		ChannelID string
+		ThreadTS  string
+		// AnchorTS is the oldest reply ts the fetch was keyed to. The
+		// reducer drops the block if the panel's oldest no longer
+		// matches — the buffer was replaced mid-flight (different
+		// thread opened, or an authoritative re-fetch landed) and
+		// prepending would splice unrelated history.
+		AnchorTS string
+		Replies  []messages.MessageItem // ascending by ts
+		// HasMoreOlder reports whether older replies remain beyond
+		// this page.
+		HasMoreOlder bool
+		Err          error
 	}
 	SendThreadReplyMsg struct {
 		ChannelID string

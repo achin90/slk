@@ -1192,8 +1192,26 @@ func (c *Client) SendReply(ctx context.Context, channelID, threadTS, text string
 	return ts, mr, nil
 }
 
+// ThreadPageLimit is how many replies one GetRepliesPage call asks
+// Slack for. Threads with thousands of replies used to be fetched in
+// full on open, which cost one request per 100 replies and then froze
+// the TUI pre-rendering every one of them. A page at a time keeps
+// both costs proportional to what is on screen.
+//
+// Kept deliberately small: the dominant cost of a page landing is not
+// the API call but the synchronous enrich + pre-render of every reply
+// in it (see thread.Model buildCache), so this is really a frame-time
+// budget. 50 still produced visible hitches when a backfill page
+// arrived.
+const ThreadPageLimit = 20
+
 // GetReplies retrieves all replies in a thread.
 // The first message in the returned slice is the parent message.
+//
+// Prefer GetRepliesPage for interactive paths: this walks every page
+// of conversations.replies before returning, which is O(replies) API
+// calls and unbounded memory. Kept for callers that genuinely need
+// the whole thread at once.
 func (c *Client) GetReplies(ctx context.Context, channelID, threadTS string) ([]slack.Message, error) {
 	var allMessages []slack.Message
 	cursor := ""
@@ -1215,6 +1233,39 @@ func (c *Client) GetReplies(ctx context.Context, channelID, threadTS string) ([]
 	}
 
 	return allMessages, nil
+}
+
+// GetRepliesPage fetches ONE page of a thread's replies, newest-last.
+//
+// beforeTS pages backwards: pass "" for the newest page, or the
+// oldest ts currently held to fetch the page immediately older than
+// it. Slack's `latest` bound is inclusive, so the caller's anchor
+// reply comes back as the last element of the older page; callers
+// must drop any ts they already hold (thread.Model.PrependReplies
+// dedups by ts).
+//
+// The returned slice is ascending by ts. hasMore reports whether
+// older replies exist beyond this page, so the UI can stop asking
+// once it has walked back to the first reply.
+//
+// The parent message is included by conversations.replies on the
+// FIRST page only (Slack always prepends it). On backward pages the
+// parent reappears when the page reaches the start of the thread —
+// callers keying on ts == threadTS can identify it either way.
+func (c *Client) GetRepliesPage(ctx context.Context, channelID, threadTS, beforeTS string) (msgs []slack.Message, hasMore bool, err error) {
+	params := &slack.GetConversationRepliesParameters{
+		ChannelID: channelID,
+		Timestamp: threadTS,
+		Limit:     ThreadPageLimit,
+	}
+	if beforeTS != "" {
+		params.Latest = beforeTS
+	}
+	msgs, hasMore, _, err = c.api.GetConversationReplies(params)
+	if err != nil {
+		return nil, false, fmt.Errorf("getting thread replies page: %w", err)
+	}
+	return msgs, hasMore, nil
 }
 
 // EditMessage updates an existing message's text. Returns the

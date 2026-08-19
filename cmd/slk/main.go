@@ -1787,10 +1787,27 @@ func run() error {
 				if wctx == nil {
 					return nil
 				}
-				replies := fetchThreadReplies(wctx.Client, chIDStr, threadTSStr, db, wctx.UserNames, tsFormat, avatarCache, router)
+				replies, hasMore := fetchThreadReplies(wctx.Client, chIDStr, threadTSStr, db, wctx.UserNames, tsFormat, avatarCache, router)
 				return ui.ThreadRepliesLoadedMsg{
-					ThreadTS: threadTSStr,
-					Replies:  replies,
+					ThreadTS:     threadTSStr,
+					Replies:      replies,
+					HasMoreOlder: hasMore,
+				}
+			},
+			FetchOlderReplies: func(channelID ids.ChannelID, threadTS ids.ThreadTS, beforeTS ids.MessageTS) tea.Msg {
+				chIDStr, threadTSStr, beforeStr := string(channelID), string(threadTS), string(beforeTS)
+				wctx := router.Active()
+				if wctx == nil {
+					return nil
+				}
+				replies, hasMore, err := fetchOlderThreadReplies(wctx.Client, chIDStr, threadTSStr, beforeStr, db, wctx.UserNames, tsFormat, router)
+				return ui.OlderThreadRepliesLoadedMsg{
+					ChannelID:    chIDStr,
+					ThreadTS:     threadTSStr,
+					AnchorTS:     beforeStr,
+					Replies:      replies,
+					HasMoreOlder: hasMore,
+					Err:          err,
 				}
 			},
 			CacheRead: func(channelID ids.ChannelID, threadTS ids.ThreadTS) []messages.MessageItem {
@@ -3568,9 +3585,14 @@ func loadCachedThreadReplies(
 		return nil
 	}
 	debuglog.Cache("loadCachedThreadReplies: channel=%s thread_ts=%s entry", channelID, threadTS)
-	rows, err := db.GetThreadReplies(channelID, threadTS)
+	// Bounded to the newest page: this runs SYNCHRONOUSLY on the UI
+	// thread when a thread opens (see ThreadCacheReadFunc), and the
+	// caller hands the result straight to SetThread, which pre-renders
+	// every row. An unbounded read of a 1000-reply thread froze the TUI
+	// on open even after the network path was paged.
+	rows, err := db.GetThreadRepliesLatest(channelID, threadTS, slackclient.ThreadPageLimit)
 	if err != nil {
-		debuglog.Cache("loadCachedThreadReplies: GetThreadReplies %s/%s: %v", channelID, threadTS, err)
+		debuglog.Cache("loadCachedThreadReplies: GetThreadRepliesLatest %s/%s: %v", channelID, threadTS, err)
 		return nil
 	}
 	if len(rows) == 0 {
@@ -3675,88 +3697,131 @@ func fetchChannelMessages(client *slackclient.Client, channelID string, db *cach
 	return msgItems
 }
 
-// fetchThreadReplies returns network thread replies (parent stripped),
-// with cache write-through. Same nil-vs-empty contract as
-// fetchChannelMessages: nil signals failure, [] signals "no replies",
-// so the ThreadRepliesLoadedMsg consumer can decide whether to clobber
-// an already-rendered cached view.
-func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache, router *workspaceRouter) []messages.MessageItem {
+// threadReplyItem converts one slack.Message from a thread fetch into
+// a MessageItem, writing the message and its reactions through to the
+// cache on the way. Shared by the newest-page fetch and the
+// scroll-to-top backfill so both paths persist identically.
+func threadReplyItem(client *slackclient.Client, m slack.Message, channelID string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) messages.MessageItem {
+	rawBytes, _ := json.Marshal(m)
+	debuglog.Cache("threadReplyItem: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
+		channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
+	authorID, userName := messageAuthor(m, userNames, db, router)
+	db.UpsertMessage(cache.Message{
+		TS:          m.Timestamp,
+		ChannelID:   channelID,
+		WorkspaceID: client.TeamID(),
+		UserID:      authorID,
+		Text:        m.Text,
+		ThreadTS:    m.ThreadTimestamp,
+		ReplyCount:  m.ReplyCount,
+		Subtype:     m.SubType,
+		RawJSON:     string(rawBytes),
+		CreatedAt:   time.Now().Unix(),
+	})
+
+	var reactions []messages.ReactionItem
+	for _, r := range m.Reactions {
+		hasReacted := false
+		for _, uid := range r.Users {
+			if uid == client.UserID() {
+				hasReacted = true
+				break
+			}
+		}
+		reactions = append(reactions, messages.ReactionItem{
+			Emoji:      r.Name,
+			Count:      r.Count,
+			HasReacted: hasReacted,
+			UserIDs:    r.Users,
+		})
+		_ = db.UpsertReaction(m.Timestamp, channelID, r.Name, r.Users, r.Count)
+	}
+
+	return messages.MessageItem{
+		TS:                m.Timestamp,
+		UserID:            authorID,
+		UserName:          userName,
+		Text:              m.Text,
+		Timestamp:         formatTimestamp(m.Timestamp, tsFormat),
+		ThreadTS:          m.ThreadTimestamp,
+		ReplyCount:        m.ReplyCount,
+		Subtype:           m.SubType,
+		Reactions:         reactions,
+		Attachments:       extractAttachments(m.Files),
+		Blocks:            extractBlocks(m.Blocks),
+		LegacyAttachments: extractLegacyAttachments(m.Attachments),
+	}
+}
+
+// fetchThreadReplies loads the NEWEST page of replies only (see
+// slackclient.ThreadPageLimit). Older pages are backfilled by
+// fetchOlderThreadReplies as the user scrolls up. hasMore reports
+// whether replies older than the returned block exist, which the UI
+// uses to decide whether scrolling to the top should fetch again.
+//
+// Paging rather than fetching the whole thread is what keeps opening a
+// 1000-reply thread responsive: the old whole-thread fetch cost one
+// request per 100 replies AND pre-rendered every reply on the UI
+// thread before the panel could draw.
+func fetchThreadReplies(client *slackclient.Client, channelID, threadTS string, db *cache.DB, userNames map[string]string, tsFormat string, avatarCache *avatar.Cache, router *workspaceRouter) (items []messages.MessageItem, hasMore bool) {
 	ctx := context.Background()
 	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s entry", channelID, threadTS)
 	start := time.Now()
-	history, err := client.GetReplies(ctx, channelID, threadTS)
+	history, hasMore, err := client.GetRepliesPage(ctx, channelID, threadTS, "")
 	if err != nil {
-		debuglog.Cache("fetchThreadReplies: GetReplies %s/%s: %v dur_ms=%d (returning nil → keep cache)",
+		debuglog.Cache("fetchThreadReplies: GetRepliesPage %s/%s: %v dur_ms=%d (returning nil → keep cache)",
 			channelID, threadTS, err, time.Since(start).Milliseconds())
-		return nil
+		return nil, false
 	}
 
 	msgItems := make([]messages.MessageItem, 0, len(history))
 	for _, m := range history {
-		rawBytes, _ := json.Marshal(m)
-		debuglog.Cache("fetchThreadReplies: upsert channel=%s ts=%s subtype=%q reply_count=%d files=%d",
-			channelID, m.Timestamp, m.SubType, m.ReplyCount, len(m.Files))
-		authorID, userName := messageAuthor(m, userNames, db, router)
-		db.UpsertMessage(cache.Message{
-			TS:          m.Timestamp,
-			ChannelID:   channelID,
-			WorkspaceID: client.TeamID(),
-			UserID:      authorID,
-			Text:        m.Text,
-			ThreadTS:    m.ThreadTimestamp,
-			ReplyCount:  m.ReplyCount,
-			Subtype:     m.SubType,
-			RawJSON:     string(rawBytes),
-			CreatedAt:   time.Now().Unix(),
-		})
+		msgItems = append(msgItems, threadReplyItem(client, m, channelID, db, userNames, tsFormat, router))
+	}
 
-		// Convert reactions
-		var reactions []messages.ReactionItem
-		for _, r := range m.Reactions {
-			hasReacted := false
-			for _, uid := range r.Users {
-				if uid == client.UserID() {
-					hasReacted = true
-					break
-				}
-			}
-			reactions = append(reactions, messages.ReactionItem{
-				Emoji:      r.Name,
-				Count:      r.Count,
-				HasReacted: hasReacted,
-				UserIDs:    r.Users,
-			})
-			_ = db.UpsertReaction(m.Timestamp, channelID, r.Name, r.Users, r.Count)
+	// conversations.replies always prepends the parent -- drop it by ts
+	// rather than by position, since a paged fetch only includes it on
+	// the page that reaches the start of the thread. Return non-nil
+	// empty on success-no-replies so the consumer can distinguish from
+	// the error path (which returns nil above).
+	out := make([]messages.MessageItem, 0, len(msgItems))
+	for _, mi := range msgItems {
+		if mi.TS == threadTS {
+			continue
 		}
-
-		msgItems = append(msgItems, messages.MessageItem{
-			TS:                m.Timestamp,
-			UserID:            authorID,
-			UserName:          userName,
-			Text:              m.Text,
-			Timestamp:         formatTimestamp(m.Timestamp, tsFormat),
-			ThreadTS:          m.ThreadTimestamp,
-			ReplyCount:        m.ReplyCount,
-			Subtype:           m.SubType,
-			Reactions:         reactions,
-			Attachments:       extractAttachments(m.Files),
-			Blocks:            extractBlocks(m.Blocks),
-			LegacyAttachments: extractLegacyAttachments(m.Attachments),
-		})
+		out = append(out, mi)
 	}
+	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s result %s has_more=%v dur_ms=%d (newest page)",
+		channelID, threadTS, summarizeMessages(out), hasMore, time.Since(start).Milliseconds())
+	return out, hasMore
+}
 
-	// First message from GetConversationReplies is the parent -- skip it for the replies list.
-	// Return non-nil empty on success-no-replies so the consumer can distinguish from the
-	// error path (which returns nil above).
-	var out []messages.MessageItem
-	if len(msgItems) > 1 {
-		out = msgItems[1:]
-	} else {
-		out = []messages.MessageItem{}
+// fetchOlderThreadReplies loads the page of replies immediately older
+// than beforeTS, with the same cache write-through as
+// fetchThreadReplies. Returns the block ascending by ts plus whether
+// still-older replies remain.
+//
+// Slack's `latest` bound is inclusive, so the anchor reply comes back
+// in this page; thread.Model.PrependReplies dedups it.
+func fetchOlderThreadReplies(client *slackclient.Client, channelID, threadTS, beforeTS string, db *cache.DB, userNames map[string]string, tsFormat string, router *workspaceRouter) (items []messages.MessageItem, hasMore bool, err error) {
+	ctx := context.Background()
+	start := time.Now()
+	history, hasMore, err := client.GetRepliesPage(ctx, channelID, threadTS, beforeTS)
+	if err != nil {
+		debuglog.Cache("fetchOlderThreadReplies: GetRepliesPage %s/%s before=%s: %v dur_ms=%d",
+			channelID, threadTS, beforeTS, err, time.Since(start).Milliseconds())
+		return nil, false, err
 	}
-	debuglog.Cache("fetchThreadReplies: channel=%s thread_ts=%s result %s dur_ms=%d (authoritative replace)",
-		channelID, threadTS, summarizeMessages(out), time.Since(start).Milliseconds())
-	return out
+	out := make([]messages.MessageItem, 0, len(history))
+	for _, m := range history {
+		if m.Timestamp == threadTS {
+			continue // parent renders as chrome, not a reply row
+		}
+		out = append(out, threadReplyItem(client, m, channelID, db, userNames, tsFormat, router))
+	}
+	debuglog.Cache("fetchOlderThreadReplies: channel=%s thread_ts=%s before=%s result %s has_more=%v dur_ms=%d",
+		channelID, threadTS, beforeTS, summarizeMessages(out), hasMore, time.Since(start).Milliseconds())
+	return out, hasMore, nil
 }
 
 // searchWorkspaceFunc builds the SearchService.SearchWorkspace

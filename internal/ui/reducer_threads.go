@@ -105,6 +105,12 @@ var reduceThreads reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 			}
 		}
 		a.threadPanel.SetThread(parentMsg, m.Replies, channelID, m.ThreadTS)
+		// Fetch only loads the newest page; record whether Slack has
+		// more so scrolling to the top backfills (and so the panel can
+		// render the "older replies" hint).
+		a.threadPanel.SetHasMoreOlder(m.HasMoreOlder)
+		a.threadPanel.SetLoadingOlder(false)
+		delete(a.fetchingOlderThread, threadKey(channelID, m.ThreadTS))
 
 		// Mark the thread as read now that the user has actually
 		// seen the replies. Server-side: fire-and-forget against
@@ -135,6 +141,32 @@ var reduceThreads reducerFunc = func(a *App, msg tea.Msg) (tea.Cmd, bool) {
 			a.sidebar.SetThreadsUnreadCount(a.threadsView.UnreadCount())
 		}
 		return cmd, true
+
+	case OlderThreadRepliesLoadedMsg:
+		// Clear the in-flight flag unconditionally, even when the block
+		// is dropped below — otherwise navigating away mid-fetch leaves
+		// backfill permanently disabled for that thread. Mirrors
+		// OlderMessagesLoadedMsg.
+		delete(a.fetchingOlderThread, threadKey(m.ChannelID, m.ThreadTS))
+		if !(a.threadVisible && m.ThreadTS == a.threadPanel.ThreadTS() && m.ChannelID == a.threadPanel.ChannelID()) {
+			return nil, true // user navigated away
+		}
+		a.threadPanel.SetLoadingOlder(false)
+		if m.Err != nil {
+			// Leave hasMoreOlder set so scrolling up retries.
+			return func() tea.Msg { return ToastMsg{Text: "Failed to load older replies"} }, true
+		}
+		if m.AnchorTS != a.threadPanel.OldestReplyTS() {
+			// Buffer replaced mid-flight (different thread, or an
+			// authoritative re-fetch landed): the block is anchored to
+			// history that is no longer on screen.
+			return nil, true
+		}
+		inserted := a.threadPanel.PrependReplies(m.Replies)
+		// A page that was entirely duplicates means we have walked back
+		// to the start of the thread even if Slack still claims more.
+		a.threadPanel.SetHasMoreOlder(m.HasMoreOlder && inserted > 0)
+		return nil, true
 
 	case ThreadsViewActivatedMsg:
 		_ = m

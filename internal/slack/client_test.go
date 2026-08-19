@@ -2093,8 +2093,11 @@ func TestListThreadSubscriptions_PaginatesUntilExhausted(t *testing.T) {
 	if got[0].RootMessage.Text != "p1" {
 		t.Errorf("expected root_msg.text to populate RootMessage.Text, got %+v", got[0].RootMessage)
 	}
-	if capturedCurrentTS[0] != "" || capturedCurrentTS[1] != "1700000001.000100" {
-		t.Errorf("current_ts = %v, want [\"\", \"1700000001.000100\"]", capturedCurrentTS)
+	// The cursor is the OLDEST item on the previous page, not its
+	// max_ts: max_ts is a window upper bound (~now) that the server
+	// echoes back unchanged, so using it re-requests page 1 forever.
+	if capturedCurrentTS[0] != "" || capturedCurrentTS[1] != "1700000000.000100" {
+		t.Errorf("current_ts = %v, want [\"\", \"1700000000.000100\"]", capturedCurrentTS)
 	}
 }
 
@@ -2116,9 +2119,14 @@ func TestListThreadSubscriptions_EmptyResponse(t *testing.T) {
 }
 
 func TestListThreadSubscriptions_RespectsHardCap(t *testing.T) {
-	// Server returns 100 subs per page with has_more=true forever.
-	// The client should stop after the hard cap (1000) and never make
-	// an 11th call.
+	// Server returns 100 DISTINCT subs per page with has_more=true
+	// forever. The client should stop after the hard cap (1000) and
+	// never make an 11th call.
+	//
+	// Every item must have a unique (channel, thread_ts): the client
+	// dedups across pages and bails when a page adds nothing new, so a
+	// fixture repeating one key would exercise that early-exit instead
+	// of the cap.
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -2129,9 +2137,14 @@ func TestListThreadSubscriptions_RespectsHardCap(t *testing.T) {
 			if i > 0 {
 				b = append(b, ',')
 			}
-			b = append(b, []byte(`{"root_msg": {"channel": "C", "ts": "1.0", "thread_ts": "1.0", "last_read": "1.0", "subscribed": true, "user": "U"}}`)...)
+			// Descending ts so the paging cursor advances the way a
+			// real backwards-paging server would drive it.
+			ts := fmt.Sprintf("%d.000100", 2_000_000_000-(calls-1)*100-i)
+			b = append(b, fmt.Sprintf(
+				`{"root_msg": {"channel": "C%s", "ts": "%s", "thread_ts": "%s", "last_read": "%s", "subscribed": true, "user": "U"}}`,
+				ts, ts, ts, ts)...)
 		}
-		b = append(b, []byte(`], "has_more": true, "max_ts": "1.0"}`)...)
+		b = append(b, []byte(`], "has_more": true, "max_ts": "2000000000.000100"}`)...)
 		_, _ = w.Write(b)
 	}))
 	defer srv.Close()

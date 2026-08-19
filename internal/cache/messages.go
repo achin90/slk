@@ -108,6 +108,14 @@ func (db *DB) GetMessage(channelID, ts string) (Message, error) {
 	return m, nil
 }
 
+// GetThreadReplies returns every cached reply in a thread, ascending
+// by ts.
+//
+// Unbounded: a thread with thousands of cached replies returns all of
+// them. Interactive callers should use GetThreadRepliesLatest instead
+// — the thread panel opens on its newest page, and enriching +
+// pre-rendering an entire large thread on the UI thread is what used
+// to freeze the TUI on open.
 func (db *DB) GetThreadReplies(channelID, threadTS string) ([]Message, error) {
 	query := `
 		SELECT ts, channel_id, workspace_id, user_id, text, thread_ts, reply_count, edited_at, is_deleted, raw_json, created_at, subtype
@@ -116,6 +124,36 @@ func (db *DB) GetThreadReplies(channelID, threadTS string) ([]Message, error) {
 		ORDER BY ts ASC`
 
 	return db.queryMessages(query, channelID, threadTS)
+}
+
+// GetThreadRepliesLatest returns at most limit of the NEWEST cached
+// replies in a thread, ascending by ts (same order as
+// GetThreadReplies, so callers are interchangeable).
+//
+// The query orders DESC to let SQLite stop after limit rows, then
+// reverses in Go — ORDER BY ts ASC LIMIT n would return the OLDEST n,
+// which is the wrong end of the thread.
+//
+// limit <= 0 falls through to the unbounded GetThreadReplies.
+func (db *DB) GetThreadRepliesLatest(channelID, threadTS string, limit int) ([]Message, error) {
+	if limit <= 0 {
+		return db.GetThreadReplies(channelID, threadTS)
+	}
+	query := `
+		SELECT ts, channel_id, workspace_id, user_id, text, thread_ts, reply_count, edited_at, is_deleted, raw_json, created_at, subtype
+		FROM messages
+		WHERE channel_id = ? AND thread_ts = ? AND is_deleted = 0
+		ORDER BY ts DESC
+		LIMIT ?`
+
+	out, err := db.queryMessages(query, channelID, threadTS, limit)
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
 
 func (db *DB) DeleteMessage(channelID, ts string) error {

@@ -143,6 +143,13 @@ type ThreadService interface {
 	// overwrites with authoritative data.
 	CacheRead(channelID ids.ChannelID, threadTS ids.ThreadTS) []messages.MessageItem
 
+	// FetchOlderReplies retrieves the page of replies immediately
+	// older than beforeTS. Returns a tea.Msg (typically
+	// OlderThreadRepliesLoadedMsg). Drives the thread panel's
+	// scroll-to-top backfill: Fetch only loads the newest page, so a
+	// long thread is walked backwards one page at a time.
+	FetchOlderReplies(channelID ids.ChannelID, threadTS ids.ThreadTS, beforeTS ids.MessageTS) tea.Msg
+
 	// Mark marks the thread as read on Slack's servers
 	// (subscriptions.thread.mark). channelID is the parent channel,
 	// threadTS is the parent message ts, ts is the latest reply ts
@@ -180,6 +187,7 @@ type ThreadService interface {
 // no-ops that operation (and returns the zero value for read paths).
 type ThreadServiceFuncs struct {
 	Fetch               ThreadFetchFunc
+	FetchOlderReplies   ThreadOlderFetchFunc
 	CacheRead           ThreadCacheReadFunc
 	Mark                ThreadMarkFunc
 	SendReply           ThreadReplySendFunc
@@ -209,6 +217,13 @@ func (t threadAdapter) Fetch(channelID ids.ChannelID, threadTS ids.ThreadTS) tea
 		return nil
 	}
 	return t.fns.Fetch(channelID, threadTS)
+}
+
+func (t threadAdapter) FetchOlderReplies(channelID ids.ChannelID, threadTS ids.ThreadTS, beforeTS ids.MessageTS) tea.Msg {
+	if t.fns.FetchOlderReplies == nil {
+		return nil
+	}
+	return t.fns.FetchOlderReplies(channelID, threadTS, beforeTS)
 }
 
 func (t threadAdapter) CacheRead(channelID ids.ChannelID, threadTS ids.ThreadTS) []messages.MessageItem {

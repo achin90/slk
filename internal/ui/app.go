@@ -237,6 +237,11 @@ type App struct {
 	// fetchingNewer is fetchingOlder's twin for the forward bridge that
 	// walks a jump window back to live (see maybeFetchNewerHistory).
 	fetchingNewer map[string]bool
+	// fetchingOlderThread is fetchingOlder's twin for the thread
+	// panel's scroll-to-top reply backfill, keyed by
+	// threadKey(channelID, threadTS) since a thread is only unique
+	// within its channel.
+	fetchingOlderThread map[string]bool
 
 	// Cached user-id -> display-name map (mirror of what SetUserNames
 	// last received). Used by openSelectedThreadCmd to populate the
@@ -536,6 +541,7 @@ func NewApp() *App {
 		channelSearchDebounce: channelSearchDebounceDelay,
 		fetchingOlder:         map[string]bool{},
 		fetchingNewer:         map[string]bool{},
+		fetchingOlderThread:   map[string]bool{},
 		mouseWheelLines:       3,
 		userNames:             map[string]string{},
 		externalUsers:         map[string]bool{},
@@ -1335,6 +1341,9 @@ func (a *App) applyScrollMove(panel Panel, delta int) tea.Cmd {
 				a.threadPanel.MoveUp()
 			}
 		}
+		// Selection reached the first loaded reply: backfill the next
+		// older page (threads open on their newest page only).
+		return a.maybeFetchOlderThreadReplies(a.threadPanel.SelectedIsFirst())
 	}
 	return nil
 }
@@ -1402,6 +1411,7 @@ func (a *App) handleGoToTop() tea.Cmd {
 		a.messagepane.GoToTop()
 	case PanelThread:
 		a.threadPanel.GoToTop()
+		return a.maybeFetchOlderThreadReplies(true)
 	}
 	return nil
 }
@@ -1476,9 +1486,9 @@ func (a *App) scrollFocusedPanel(delta int) tea.Cmd {
 	case PanelThread:
 		if delta < 0 {
 			a.threadPanel.ScrollUp(n)
-		} else {
-			a.threadPanel.ScrollDown(n)
+			return a.maybeFetchOlderThreadReplies(a.threadPanel.ViewportAtTop())
 		}
+		a.threadPanel.ScrollDown(n)
 	}
 	return nil
 }
@@ -1509,6 +1519,46 @@ func (a *App) maybeFetchOlderHistory(atTop bool) tea.Cmd {
 			return channels.FetchOlder(chID, oldestTS)
 		},
 	)
+}
+
+// threadKey builds the fetchingOlderThread map key. A thread ts is
+// only unique within its channel, so both parts are needed.
+func threadKey(channelID, threadTS string) string {
+	return channelID + "\x00" + threadTS
+}
+
+// maybeFetchOlderThreadReplies kicks off a backfill of older thread
+// replies when the thread viewport is scrolled to the top and more
+// history exists. Twin of maybeFetchOlderHistory, keyed by
+// (channel, thread) instead of channel.
+//
+// Threads open on their newest page (slackclient.ThreadPageLimit), so
+// this is what makes the rest of a long thread reachable. Returns nil
+// when not at the top, when a fetch is already in flight, or when
+// Slack has reported no more history.
+func (a *App) maybeFetchOlderThreadReplies(atTop bool) tea.Cmd {
+	if !atTop || !a.threadVisible || !a.threadPanel.HasMoreOlder() {
+		return nil
+	}
+	channelID := a.threadPanel.ChannelID()
+	threadTS := a.threadPanel.ThreadTS()
+	oldest := a.threadPanel.OldestReplyTS()
+	if channelID == "" || threadTS == "" || oldest == "" {
+		return nil
+	}
+	key := threadKey(channelID, threadTS)
+	if a.fetchingOlderThread[key] {
+		return nil
+	}
+	a.fetchingOlderThread[key] = true
+	a.threadPanel.SetLoadingOlder(true)
+	threads := a.threads
+	chID := ids.ChannelID(channelID)
+	tTS := ids.ThreadTS(threadTS)
+	beforeTS := ids.MessageTS(oldest)
+	return func() tea.Msg {
+		return threads.FetchOlderReplies(chID, tTS, beforeTS)
+	}
 }
 
 // jumpToLive answers G on a jump window by refetching the channel

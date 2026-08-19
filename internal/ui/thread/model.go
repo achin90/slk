@@ -106,6 +106,16 @@ type Model struct {
 	// set HasReacted only for the current user's own reactions.
 	currentUserID string
 
+	// hasMoreOlder is true while Slack reports replies older than the
+	// oldest one held. Threads open on their newest page (see
+	// slackclient.ThreadPageLimit), so a long thread starts with this
+	// set and the app backfills as the user scrolls up.
+	hasMoreOlder bool
+	// loadingOlder is true while a backward page fetch is in flight.
+	// Rendered as a hint above the first reply and used by the app to
+	// avoid issuing overlapping fetches.
+	loadingOlder bool
+
 	// Render cache -- pre-rendered reply entries (unbordered content
 	// captured per reply; borders are applied later when assembling
 	// viewContent).
@@ -299,6 +309,12 @@ func (m *Model) HandleAvatarReady(userID string) {
 func (m *Model) SetThread(parent messages.MessageItem, replies []messages.MessageItem, channelID, threadTS string) {
 	if channelID != m.channelID || threadTS != m.threadTS {
 		m.unreadBoundaryTS = ""
+		// Paging state belongs to one thread; a different thread starts
+		// over. Left alone on a same-thread refresh so an in-flight
+		// backfill's hasMoreOlder isn't clobbered by the authoritative
+		// re-fetch of the newest page.
+		m.hasMoreOlder = false
+		m.loadingOlder = false
 	}
 	m.ClearSelection()
 	m.parent = parent
@@ -339,6 +355,97 @@ func (m *Model) SetUnreadBoundary(ts string) {
 func (m *Model) UnreadBoundaryTS() string {
 	return m.unreadBoundaryTS
 }
+
+// PrependReplies splices a block of older replies onto the front of
+// the reply list, preserving the user's reading position: `selected`
+// shifts by however many rows were actually inserted so the reply the
+// cursor was on stays under the cursor.
+//
+// Dedups by ts against the current head — Slack's `latest` bound is
+// inclusive, so a backward page always repeats the anchor reply, and
+// overlapping pages are normal rather than exceptional. Returns the
+// number of rows actually inserted (0 when the page was entirely
+// duplicates, which the caller can read as "no more history").
+//
+// older must be ascending by ts, the same order SetThread expects.
+func (m *Model) PrependReplies(older []messages.MessageItem) int {
+	if len(older) == 0 {
+		return 0
+	}
+	have := make(map[string]struct{}, len(m.replies))
+	for _, r := range m.replies {
+		if r.TS != "" {
+			have[r.TS] = struct{}{}
+		}
+	}
+	fresh := make([]messages.MessageItem, 0, len(older))
+	for _, r := range older {
+		if r.TS != "" {
+			if _, dup := have[r.TS]; dup {
+				continue
+			}
+			have[r.TS] = struct{}{}
+		}
+		// The parent is rendered as chrome, never as a reply row.
+		if r.TS == m.threadTS {
+			continue
+		}
+		fresh = append(fresh, r)
+	}
+	if len(fresh) == 0 {
+		return 0
+	}
+	m.replies = append(fresh, m.replies...)
+	// Keep the cursor on the same reply it was on before the splice.
+	m.selected += len(fresh)
+	// The viewport must not jump: shifting yOffset by the height of
+	// the inserted block is not possible before the cache rebuild, so
+	// mark the selection unsnapped and let View() re-snap to the
+	// (still-correct) selected reply.
+	m.hasSnapped = false
+	m.InvalidateCache()
+	return len(fresh)
+}
+
+// OldestReplyTS returns the ts of the oldest reply currently held, or
+// "" when the thread has no replies. Used by the app layer to key a
+// backward page fetch (and to validate the result against the buffer
+// it was requested for).
+func (m *Model) OldestReplyTS() string {
+	if len(m.replies) == 0 {
+		return ""
+	}
+	return m.replies[0].TS
+}
+
+// SetHasMoreOlder records whether Slack reports older replies beyond
+// the oldest one held. The app layer stops issuing backward fetches
+// once this is false, and View() renders a hint while it is true.
+func (m *Model) SetHasMoreOlder(v bool) {
+	if m.hasMoreOlder != v {
+		m.hasMoreOlder = v
+		m.viewCacheValid = false
+		m.chromeCacheValid = false
+		m.dirty()
+	}
+}
+
+// HasMoreOlder reports whether older replies remain unfetched.
+func (m *Model) HasMoreOlder() bool { return m.hasMoreOlder }
+
+// SetLoadingOlder toggles the "loading older replies" state, which
+// View() renders as a spinner-ish hint above the first reply.
+func (m *Model) SetLoadingOlder(v bool) {
+	if m.loadingOlder != v {
+		m.loadingOlder = v
+		m.viewCacheValid = false
+		m.chromeCacheValid = false
+		m.dirty()
+	}
+}
+
+// LoadingOlder reports whether a backward page fetch is in flight.
+func (m *Model) LoadingOlder() bool { return m.loadingOlder }
 
 // AddReply appends a reply to the thread and scrolls to the bottom.
 // We always advance `selected` to the new last index so the incoming
@@ -433,6 +540,8 @@ func (m *Model) Clear() {
 	m.channelID = ""
 	m.threadTS = ""
 	m.selected = 0
+	m.hasMoreOlder = false
+	m.loadingOlder = false
 	m.InvalidateCache()
 }
 
@@ -762,6 +871,13 @@ func (m *Model) MoveDown() {
 
 func (m *Model) IsAtBottom() bool {
 	return m.selected >= len(m.replies)-1
+}
+
+// SelectedIsFirst reports whether the cursor is on the oldest loaded
+// reply. Used by the app layer to trigger the older-replies backfill
+// on j/k navigation (the wheel/PageUp route uses ViewportAtTop).
+func (m *Model) SelectedIsFirst() bool {
+	return len(m.replies) > 0 && m.selected == 0
 }
 
 // GoToTop moves the selection to the first reply.
@@ -1573,6 +1689,20 @@ func (m *Model) View(height, width int) string {
 		// since the thick left border is purely horizontal padding), plus
 		// 1 line per inter-reply separator.
 		m.entryOffsets = m.entryOffsets[:0]
+
+		// Backfill hint above the oldest loaded reply. Threads open on
+		// their newest page, so without this the top of the list looks
+		// like the start of the thread. Not part of any cache entry, so
+		// selection overlay / extraction skip it the same way the
+		// separator and divider rows do.
+		if m.hasMoreOlder || m.loadingOlder {
+			label := "↑ scroll up for older replies"
+			if m.loadingOlder {
+				label = "↑ loading older replies…"
+			}
+			allRows = append(allRows, dateSeparatorStyle.Render(label))
+			currentLine++
+		}
 
 		for i, e := range m.cache {
 			// Insert a centered day-divider row when this reply's local

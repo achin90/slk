@@ -79,6 +79,11 @@ type ThreadFetchFunc func(channelID ids.ChannelID, threadTS ids.ThreadTS) tea.Ms
 // response overwrites with authoritative data.
 type ThreadCacheReadFunc func(channelID ids.ChannelID, threadTS ids.ThreadTS) []messages.MessageItem
 
+// ThreadOlderFetchFunc loads one page of thread replies older than
+// beforeTS. Returns the resulting tea.Msg (typically
+// OlderThreadRepliesLoadedMsg).
+type ThreadOlderFetchFunc func(channelID ids.ChannelID, threadTS ids.ThreadTS, beforeTS ids.MessageTS) tea.Msg
+
 // ThreadMarkFunc is called to mark a thread as read on Slack's servers
 // (subscriptions.thread.mark). channelID is the parent channel, threadTS
 // is the parent message ts, and ts is the latest reply ts the user has now

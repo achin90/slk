@@ -272,6 +272,61 @@ func TestGetThreadReplies(t *testing.T) {
 	}
 }
 
+// TestGetThreadRepliesLatest_ReturnsNewestAscending guards the subtle
+// part of the bounded thread read: the query orders DESC so SQLite can
+// stop early, then reverses in Go. A plain `ORDER BY ts ASC LIMIT n`
+// would return the OLDEST n — the wrong end of the thread, which for
+// the thread panel means opening on ancient replies.
+func TestGetThreadRepliesLatest_ReturnsNewestAscending(t *testing.T) {
+	db := setupDBWithWorkspace(t)
+	defer db.Close()
+	db.UpsertChannel(Channel{ID: "C1", WorkspaceID: "T1", Name: "general", Type: "channel", IsMember: true})
+
+	db.UpsertMessage(Message{TS: "1700000001.000000", ChannelID: "C1", WorkspaceID: "T1", UserID: "U1", Text: "parent"})
+	for i := 2; i <= 11; i++ {
+		db.UpsertMessage(Message{
+			TS:          fmt.Sprintf("17000000%02d.000000", i),
+			ChannelID:   "C1",
+			WorkspaceID: "T1",
+			UserID:      "U2",
+			Text:        fmt.Sprintf("reply %d", i),
+			ThreadTS:    "1700000001.000000",
+		})
+	}
+
+	got, err := db.GetThreadRepliesLatest("C1", "1700000001.000000", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	// Newest three (09, 10, 11), ascending.
+	want := []string{"1700000009.000000", "1700000010.000000", "1700000011.000000"}
+	for i, w := range want {
+		if got[i].TS != w {
+			t.Errorf("got[%d].TS = %s, want %s (full: %v)", i, got[i].TS, w, tsList(got))
+		}
+	}
+
+	// limit <= 0 must fall through to the unbounded read.
+	all, err := db.GetThreadRepliesLatest("C1", "1700000001.000000", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 10 {
+		t.Errorf("limit=0 returned %d, want all 10", len(all))
+	}
+}
+
+func tsList(msgs []Message) []string {
+	out := make([]string, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.TS
+	}
+	return out
+}
+
 // TestGetMessages_IncludesThreadParents guards against the regression
 // where thread parents (top-level messages whose thread_ts equals
 // their own ts because they have replies) were excluded from

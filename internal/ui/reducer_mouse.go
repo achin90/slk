@@ -128,9 +128,9 @@ func reduceMouseWheel(a *App, m tea.MouseWheelMsg) tea.Cmd {
 	case a.threadVisible && x < a.layout.ThreadEnd():
 		if up {
 			a.threadPanel.ScrollUp(wheelLinesPerNotch)
-		} else {
-			a.threadPanel.ScrollDown(wheelLinesPerNotch)
+			return a.maybeFetchOlderThreadReplies(a.threadPanel.ViewportAtTop())
 		}
+		a.threadPanel.ScrollDown(wheelLinesPerNotch)
 		return nil
 	}
 	return nil
